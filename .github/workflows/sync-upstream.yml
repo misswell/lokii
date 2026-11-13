@@ -1,0 +1,134 @@
+name: Sync Upstream
+
+# 每日检查上游是否发布了新版本；若有则合并上游 tag、对齐版本号，并触发 Release 重新编译。
+# GitHub cron 使用 UTC：01:00 UTC = 09:00 北京时间。
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只执行检查与合并，不推送、不打 tag、不触发发布'
+        type: boolean
+        default: false
+
+concurrency:
+  group: lokii-sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    name: 同步上游发布
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM_REPO: huangy7/lokii
+    steps:
+      - name: checkout fork
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: resolve upstream release
+        id: upstream
+        run: |
+          set -euo pipefail
+          TAG="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
+          case "$TAG" in
+            v*) ;;
+            *) echo "[FAIL] 上游最新发布 tag 不以 v 开头: $TAG"; exit 1 ;;
+          esac
+          UP="${TAG#v}"
+          CUR="$(grep -m1 '^version = ' lokii-core/Cargo.toml | cut -d'"' -f2)"
+          echo "current=${CUR}" >> "$GITHUB_OUTPUT"
+          echo "upstream=${UP}" >> "$GITHUB_OUTPUT"
+          if python3 -c 'import sys; t=lambda v: tuple(map(int, v.split("."))); sys.exit(0 if t(sys.argv[2]) > t(sys.argv[1]) else 1)' "$CUR" "$UP"; then
+            echo "should_sync=true" >> "$GITHUB_OUTPUT"
+            echo "[INFO] 上游发布新版本 $UP（当前 $CUR），开始同步"
+          else
+            echo "should_sync=false" >> "$GITHUB_OUTPUT"
+            echo "[INFO] 上游最新版本 $UP 不高于当前 $CUR，无需同步"
+          fi
+
+      - name: merge upstream release
+        if: steps.upstream.outputs.should_sync == 'true'
+        id: merge
+        run: |
+          set -euo pipefail
+          UP="${{ steps.upstream.outputs.upstream }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch --no-tags upstream "refs/tags/v$UP:refs/remotes/upstream-release/v$UP"
+          REF="refs/remotes/upstream-release/v$UP"
+
+          # 先探测真实冲突，便于提示哪些 fork 定制覆盖了上游改动
+          if ! git merge --no-commit --no-ff "$REF" >/dev/null 2>&1; then
+            CONFLICTS="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            echo "::warning::上游 v$UP 与 fork 定制存在冲突，已保留 fork 版本：$CONFLICTS"
+            echo "**冲突文件（保留 fork 版本）**：\`$CONFLICTS\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          git merge --abort 2>/dev/null || true
+
+          git merge -X ours --no-edit -m "chore: 同步上游 v$UP" "$REF"
+
+          # 上游发布提交与 fork 的版本号必然冲突，-X ours 会保留旧版本，这里强制对齐上游 tag
+          sed -i '' "s/^version = \".*\"/version = \"$UP\"/" lokii-core/Cargo.toml
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $UP" Lokii/Lokii/Info.plist
+          python3 - "$UP" <<'PY'
+          import re
+          import sys
+          path = 'Cargo.lock'
+          source = open(path).read()
+          source = re.sub(r'(\[\[package\]\]\nname = "lokii-core"\nversion = ")[^"]+"', r'\g<1>' + sys.argv[1] + '"', source)
+          open(path, 'w').write(source)
+          PY
+          if ! git diff --quiet; then
+            git add Cargo.lock lokii-core/Cargo.toml Lokii/Lokii/Info.plist
+            git commit -m "chore: 发布 v$UP 版本"
+          fi
+          echo "merge_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: push and dispatch release
+        if: steps.upstream.outputs.should_sync == 'true'
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          UP="${{ steps.upstream.outputs.upstream }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "[INFO] dry-run：跳过推送、打 tag 与发布"
+            git log --oneline -3
+            git diff --stat "refs/remotes/upstream-release/v$UP" HEAD | tail -20
+            exit 0
+          fi
+          git push origin main
+          if git ls-remote --tags origin "refs/tags/v$UP" | grep -q .; then
+            echo "[INFO] origin 已存在 tag v$UP"
+          else
+            git tag -a "v$UP" -m "Lokii v$UP（同步上游发布）"
+            git push origin "refs/tags/v$UP"
+          fi
+          if gh release view "v$UP" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "[INFO] v$UP 已有发布记录，跳过触发"
+          else
+            gh workflow run release.yml --ref "v$UP" -R "$GITHUB_REPOSITORY"
+            echo "[INFO] 已触发 Release 工作流：v$UP"
+          fi
+
+      # 兜底：版本已对齐但发布缺失（例如上次 tag 推送后触发失败）时补触发
+      - name: recover missing release
+        if: steps.upstream.outputs.should_sync == 'false'
+        run: |
+          set -euo pipefail
+          CUR="${{ steps.upstream.outputs.current }}"
+          if git ls-remote --tags origin "refs/tags/v$CUR" | grep -q . \
+            && ! gh release view "v$CUR" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh workflow run release.yml --ref "v$CUR" -R "$GITHUB_REPOSITORY"
+            echo "[INFO] v$CUR 缺少发布记录，已补触发 Release"
+          fi

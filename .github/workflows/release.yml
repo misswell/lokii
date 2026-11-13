@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+  # 允许上游同步任务在推送 tag 后显式触发（GITHUB_TOKEN 推送的 tag 不会触发 push 工作流）
+  workflow_dispatch:
 
 concurrency:
   group: lokii-release-updates
