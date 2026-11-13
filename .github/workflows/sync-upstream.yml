@@ -49,10 +49,10 @@ jobs:
           echo "upstream=${UP}" >> "$GITHUB_OUTPUT"
           if python3 -c 'import sys; t=lambda v: tuple(map(int, v.split("."))); sys.exit(0 if t(sys.argv[2]) > t(sys.argv[1]) else 1)' "$CUR" "$UP"; then
             echo "should_sync=true" >> "$GITHUB_OUTPUT"
-            echo "[INFO] 上游发布新版本 $UP（当前 $CUR），开始同步"
+            echo "[INFO] 上游发布新版本 ${UP}（当前 ${CUR}），开始同步"
           else
             echo "should_sync=false" >> "$GITHUB_OUTPUT"
-            echo "[INFO] 上游最新版本 $UP 不高于当前 $CUR，无需同步"
+            echo "[INFO] 上游最新版本 ${UP} 不高于当前 ${CUR}，无需同步"
           fi
 
       - name: merge upstream release
