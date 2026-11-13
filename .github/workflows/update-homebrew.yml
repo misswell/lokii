@@ -8,6 +8,9 @@ on:
       tag_name:
         type: string
         required: false
+      tap_repository:
+        type: string
+        required: false
   release:
     types: [published]
   workflow_dispatch:
@@ -52,7 +55,7 @@ jobs:
       - name: Checkout Homebrew Tap
         uses: actions/checkout@v5
         with:
-          repository: huangy7/homebrew-tap
+          repository: ${{ inputs.tap_repository || format('{0}/homebrew-tap', github.repository_owner) }}
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 

@@ -29,9 +29,9 @@
     <key>NSMainNibFile</key>
     <string></string>
     <key>SUPublicEDKey</key>
-    <string>pxrsUMDmDnkDlrD0UqaLGc8tIGwWuY7xmmVT2G3SXtE=</string>
+    <string>Ux/hWan9wjlFgP2C1GXOcTqTHJLgHCYffPkxLO6djCA=</string>
     <key>SUFeedURL</key>
-    <string>https://huangy7.github.io/lokii/updates/$(CURRENT_ARCH).xml</string>
+    <string>https://misswell.github.io/lokii/updates/$(CURRENT_ARCH).xml</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUUpdateCheckInterval</key>

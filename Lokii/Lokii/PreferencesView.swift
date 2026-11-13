@@ -1172,7 +1172,7 @@ struct PreferencesView: View {
             SettingsRowDivider()
             SettingsRow(L("prefs.about.source")) {
                 Button(L("prefs.about.source.action")) {
-                    if let url = URL(string: "https://github.com/huangy7/lokii") {
+                    if let url = URL(string: "https://github.com/misswell/lokii") {
                         NSWorkspace.shared.open(url)
                     }
                 }

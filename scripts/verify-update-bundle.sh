@@ -8,7 +8,7 @@ plist="$bundle/Contents/Info.plist"
 read_plist() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist"; }
 public_key="$(read_plist SUPublicEDKey)"
 [[ $(printf '%s' "$public_key" | base64 --decode | wc -c | tr -d ' ') == 32 ]]
-[[ $(read_plist SUFeedURL) == "https://huangy7.github.io/lokii/updates/$architecture.xml" ]]
+[[ $(read_plist SUFeedURL) == "https://misswell.github.io/lokii/updates/$architecture.xml" ]]
 [[ $(read_plist SUAllowsAutomaticUpdates) == false ]]
 [[ $(read_plist SUAutomaticallyUpdate) == false ]]
 [[ $(read_plist SUEnableAutomaticChecks) == true ]]

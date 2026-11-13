@@ -42,8 +42,8 @@ for architecture in arm64 x86_64; do
     notes="$assets/Lokii-$version-$architecture.md"
     if [[ -f "$notes" ]]; then cp "$notes" "$staging/"; fi
     "$tools/generate_appcast" --ed-key-file "$private_key" --maximum-deltas 0 --maximum-versions 5 \
-        -o "$staging/appcast.xml" --embed-release-notes --download-url-prefix "https://github.com/huangy7/lokii/releases/download/v$version/" \
-        --link 'https://github.com/huangy7/lokii/releases/latest' "$staging"
+        -o "$staging/appcast.xml" --embed-release-notes --download-url-prefix "https://github.com/misswell/lokii/releases/download/v$version/" \
+        --link 'https://github.com/misswell/lokii/releases/latest' "$staging"
     swift "$repo_root/scripts/verify-update-feed.swift" "$staging/appcast.xml" "$archive" "$public_key" "$version" "$architecture"
     cp "$staging/appcast.xml" "$temporary/feeds/$architecture.xml"
 done

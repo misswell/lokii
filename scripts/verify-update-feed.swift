@@ -21,7 +21,7 @@ func validateFeed() throws {
         }
     }
     let archiveURL = URL(fileURLWithPath: arguments[2])
-    let expectedURL = "https://github.com/huangy7/lokii/releases/download/v\(arguments[4])/\(archiveURL.lastPathComponent)"
+    let expectedURL = "https://github.com/misswell/lokii/releases/download/v\(arguments[4])/\(archiveURL.lastPathComponent)"
     let matching = try items.filter { item in
         let enclosures = try item.nodes(forXPath: "enclosure")
         return (enclosures.first as? XMLElement)?.attribute(forName: "url")?.stringValue == expectedURL

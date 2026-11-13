@@ -88,7 +88,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func openDownloadPage() {
-        guard let url = URL(string: "https://github.com/huangy7/lokii/releases/latest") else { return }
+        guard let url = URL(string: "https://github.com/misswell/lokii/releases/latest") else { return }
         NSWorkspace.shared.open(url)
     }
 }

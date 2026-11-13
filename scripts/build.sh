@@ -261,7 +261,7 @@ build_app() {
     <key>SUPublicEDKey</key>
     <string>$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$repo_root/Lokii/Lokii/Info.plist")</string>
     <key>SUFeedURL</key>
-    <string>https://huangy7.github.io/lokii/updates/${arch_flag}.xml</string>
+    <string>https://misswell.github.io/lokii/updates/${arch_flag}.xml</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUUpdateCheckInterval</key>
