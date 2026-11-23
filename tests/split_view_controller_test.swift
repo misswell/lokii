@@ -40,6 +40,8 @@ public struct FfiSearchResult: Equatable, Hashable {
     public var modified: Int64
     public var matchPositions: [FfiMatchRange]
     public var parentMatchPositions: [FfiMatchRange]
+    public var isOffline: Bool
+    public var volumeName: String?
 
     public init(
         name: String,
@@ -50,7 +52,9 @@ public struct FfiSearchResult: Equatable, Hashable {
         created: Int64,
         modified: Int64,
         matchPositions: [FfiMatchRange] = [],
-        parentMatchPositions: [FfiMatchRange] = []
+        parentMatchPositions: [FfiMatchRange] = [],
+        isOffline: Bool = false,
+        volumeName: String? = nil
     ) {
         self.name = name
         self.path = path
@@ -61,6 +65,8 @@ public struct FfiSearchResult: Equatable, Hashable {
         self.modified = modified
         self.matchPositions = matchPositions
         self.parentMatchPositions = parentMatchPositions
+        self.isOffline = isOffline
+        self.volumeName = volumeName
     }
 }
 """
@@ -110,6 +116,14 @@ final class MockSplitDelegate: SearchMainSplitViewControllerDelegate {
         trashedPaths = paths
         trashedRemainingCount = remainingCount
         trashCallCount += 1
+    }
+
+    var lastFilteredCount: Int?
+    var lastFilteredDirectory: String?
+
+    func searchMainSplitViewDidFilterResults(filteredCount: Int, totalCount: Int, activeDirectory: String?) {
+        lastFilteredCount = filteredCount
+        lastFilteredDirectory = activeDirectory
     }
 }
 
@@ -226,7 +240,80 @@ assertEqual(splitVC.searchResultsViewController.results.isEmpty, true, "清空�
 
 splitVC.onLanguageChanged()
 
-print("测试全部通过：5/5 项断言成功。")
+print("[6/6] 测试侧边栏折叠时的惰性目录树构建、展开补建与自动首行预选...")
+let lazySplitVC = SearchMainSplitViewController()
+_ = lazySplitVC.view
+let lazyDelegate = MockSplitDelegate()
+lazySplitVC.delegate = lazyDelegate
+
+assertEqual(lazySplitVC.isSidebarCollapsed, true, "初始侧边栏应折叠")
+assertEqual(lazySplitVC.needsDirectoryTree, false, "侧边栏折叠且无目录过滤时 needsDirectoryTree 应为 false")
+
+// 传入 deferTreeBuild: true + autoSelectFirstRow: true，不构建树也不更新 OutlineView
+lazySplitVC.updateSearchResults(
+    rawResults: testRawResults,
+    tree: nil,
+    deferTreeBuild: true,
+    autoSelectFirstRow: true
+)
+assertEqual(lazySplitVC.sidebarTreeViewController.currentTree == nil, true, "侧边栏折叠且 deferTreeBuild 为 true 时应跳过目录树更新")
+assertEqual(lazySplitVC.searchResultsViewController.selectedResult, itemA, "启用 autoSelectFirstRow 时应自动预选首行 itemA")
+assertEqual(lazyDelegate.lastFilteredCount, 3, "过滤回调应报告当前可见条目数 3")
+
+// 展开侧边栏后自动即时补建目录树
+lazySplitVC.toggleSidebar()
+assertEqual(lazySplitVC.isSidebarCollapsed, false, "toggleSidebar 后侧边栏应展开")
+assertEqual(lazySplitVC.sidebarTreeViewController.currentTree?.totalMatchCount, 3, "展开侧边栏时应自动补建包含 3 项结果的目录树")
+
+print("[7/7] 测试 isUpdatingSearchResults 在 updateSearchResults 与侧边栏取消筛选间准确区分（防空态递归崩溃）...")
+final class IdleEmptyRecursionGuardDelegate: SearchMainSplitViewControllerDelegate {
+    weak var splitVC: SearchMainSplitViewController?
+    var observedUpdatingFlags: [Bool] = []
+    var enterIdleCallCount = 0
+
+    func enterIdleEmpty() {
+        enterIdleCallCount += 1
+        assertTrue(enterIdleCallCount <= 2, "禁止在 updateSearchResults 同步回调中无限递归重入 enterIdleEmpty")
+        guard let splitVC else { return }
+        splitVC.searchResultsViewController.emptyState = .idleEmpty
+        splitVC.updateSearchResults(rawResults: [], tree: nil, deferTreeBuild: false, autoSelectFirstRow: false)
+    }
+
+    func searchMainSplitViewDidSelect(result: FfiSearchResult?) {}
+    func searchMainSplitViewDidDoubleClick(result: FfiSearchResult) {}
+    func searchMainSplitViewDidFilterResults(filteredCount: Int, totalCount: Int, activeDirectory: String?) {
+        guard let splitVC else { return }
+        observedUpdatingFlags.append(splitVC.isUpdatingSearchResults)
+        if !splitVC.isUpdatingSearchResults && activeDirectory == nil {
+            enterIdleEmpty()
+        }
+    }
+}
+
+let recursionSplitVC = SearchMainSplitViewController()
+_ = recursionSplitVC.view
+let recursionDelegate = IdleEmptyRecursionGuardDelegate()
+recursionDelegate.splitVC = recursionSplitVC
+recursionSplitVC.delegate = recursionDelegate
+
+// 1. 外部直接进入空态（对应设置页开启「未输入时隐藏结果列表」）：同步回调期间 isUpdatingSearchResults 必须为 true，不得触发重入
+recursionDelegate.enterIdleEmpty()
+assertEqual(recursionDelegate.enterIdleCallCount, 1, "直接进入空态时不得经由回调重入")
+assertEqual(recursionDelegate.observedUpdatingFlags, [true], "updateSearchResults 内部派发回调时 isUpdatingSearchResults 必须为 true")
+assertEqual(recursionSplitVC.searchResultsViewController.emptyState, .idleEmpty, "空态应正确保持为 .idleEmpty")
+
+// 2. 用户在空搜索下取消侧边栏目录筛选：isUpdatingSearchResults 为 false，恰好触发一次 enterIdleEmpty 收敛
+recursionSplitVC.updateSearchResults(rawResults: testRawResults, tree: testTree)
+recursionSplitVC.searchResultsViewController.emptyState = .noMatches
+recursionSplitVC.sidebarDidSelectDirectory(path: "/workspace/src")
+recursionDelegate.enterIdleCallCount = 0
+recursionDelegate.observedUpdatingFlags.removeAll()
+recursionSplitVC.sidebarDidSelectDirectory(path: nil)
+assertEqual(recursionDelegate.enterIdleCallCount, 1, "用户取消侧边栏目录筛选应恰好触发 1 次空态收敛")
+assertEqual(recursionDelegate.observedUpdatingFlags, [false, true], "首次由侧边栏触发为 false，随后 updateSearchResults 内部为 true 且终止递归")
+assertEqual(recursionSplitVC.searchResultsViewController.emptyState, .idleEmpty, "取消侧边栏筛选后应稳定停留在 .idleEmpty")
+
+print("测试全部通过：7/7 项断言成功。")
 """
 
 let combinedSource = """

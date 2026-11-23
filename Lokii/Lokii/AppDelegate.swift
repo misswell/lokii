@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard engine.getConfig()?.window.hideOnBlur ?? true else { return }
-        mainWindow?.window?.orderOut(nil)
+        mainWindow?.hideWindow(animated: false)
     }
 
     // MARK: - Global Shortcut
@@ -94,28 +94,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func statusItemClicked() {
         guard let event = NSApp.currentEvent else { return }
         if event.type == .rightMouseUp {
-            let menu = NSMenu()
-
-            let trayPrefsItem = NSMenuItem(title: L("menu.preferences"), action: #selector(openPreferences), keyEquivalent: "")
-            trayPrefsItem.target = self
-            menu.addItem(trayPrefsItem)
-
-            let checkUpdatesItem = NSMenuItem(title: L("menu.checkUpdates"), action: #selector(checkForUpdates), keyEquivalent: "")
-            checkUpdatesItem.target = self
-            menu.addItem(checkUpdatesItem)
-
-            menu.addItem(NSMenuItem.separator())
-
-            let quitItem = NSMenuItem(title: L("menu.quit"), action: #selector(quitApp), keyEquivalent: "")
-            quitItem.target = self
-            menu.addItem(quitItem)
-
+            let menu = buildTrayMenu()
             menu.delegate = self
             statusItem?.menu = menu
             statusItem?.button?.performClick(nil)
         } else {
             toggleWindow()
         }
+    }
+
+    private func buildTrayMenu() -> NSMenu {
+        let menu = NSMenu()
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+
+        func makeItem(key: String, symbol: String, action: Selector) -> NSMenuItem {
+            let item = NSMenuItem(title: L(key), action: action, keyEquivalent: "")
+            item.target = self
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(iconConfig) {
+                image.isTemplate = true
+                item.image = image
+            }
+            return item
+        }
+
+        menu.addItem(makeItem(key: "tray.preferences", symbol: "gearshape", action: #selector(openPreferences)))
+
+        let trayRebuildItem = makeItem(key: "tray.rebuildIndex", symbol: "arrow.clockwise", action: #selector(rebuildIndex))
+        trayRebuildItem.isEnabled = mainWindow?.canTriggerRebuild ?? false
+        menu.addItem(trayRebuildItem)
+
+        menu.addItem(makeItem(key: "tray.checkUpdates", symbol: "arrow.down.circle", action: #selector(checkForUpdates)))
+
+        menu.addItem(NSMenuItem.separator())
+
+        menu.addItem(makeItem(key: "tray.quit", symbol: "power", action: #selector(quitApp)))
+        return menu
     }
 
     // MARK: - Full Disk Access
@@ -169,6 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         prefsItem.target = self
         appMenu.addItem(prefsItem)
 
+        // Rebuild Index with Cmd+Shift+R
+        let rebuildItem = NSMenuItem(localizedKey: "menu.rebuildIndex", action: #selector(rebuildIndex), keyEquivalent: "r")
+        rebuildItem.keyEquivalentModifierMask = [.command, .shift]
+        rebuildItem.target = self
+        appMenu.addItem(rebuildItem)
+
         appMenu.addItem(NSMenuItem.separator())
 
         // Services menu
@@ -205,6 +225,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let windowMenu = NSMenu(title: L("menu.window"))
         windowMenu.addLocalizedItem("menu.close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addLocalizedItem("menu.minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(NSMenuItem.separator())
+        let resetSizeItem = NSMenuItem(localizedKey: "menu.resetWindowSize", action: #selector(resetWindowSize), keyEquivalent: "")
+        resetSizeItem.target = self
+        windowMenu.addItem(resetSizeItem)
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
 
@@ -216,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleWindow() {
         // 以窗口是否实际可见判定收起：点击状态栏图标不会激活应用，依赖 NSApp.isActive 会在失焦后误判为显示
         if let window = mainWindow?.window, window.isVisible, window.occlusionState.contains(.visible) {
-            window.orderOut(nil)
+            mainWindow?.hideWindow(animated: false)
         } else {
             mainWindow?.showWindow(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -240,8 +264,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openPreferences() {
+        showPreferences()
+    }
+
+    @objc private func rebuildIndex() {
+        mainWindow?.triggerRebuildIndex()
+    }
+
+    @objc private func resetWindowSize() {
+        mainWindow?.resetToDefaultWindowFrame()
+    }
+
+    /// 从搜索结果空态直达索引页
+    func openIndexPreferences() {
+        showPreferences(tab: "index")
+    }
+
+    private func showPreferences(tab: String? = nil) {
         if preferencesController == nil {
             preferencesController = PreferencesWindowController(engine: engine)
+        }
+        if let tab {
+            preferencesController?.selectTab(tab)
         }
         preferencesController?.showWindow(nil)
         preferencesController?.window?.makeKeyAndOrderFront(nil)
@@ -256,6 +300,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quitApp() {
         NSApp.terminate(nil)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(rebuildIndex) {
+            return mainWindow?.canTriggerRebuild ?? false
+        }
+        return true
     }
 }
 

@@ -1,8 +1,13 @@
 /* AppDelegate - tray menu */
-"menu.preferences" = "偏好设置…";
-"menu.quit" = "退出 Lokii";
+"tray.preferences" = "偏好设置…";
+"tray.rebuildIndex" = "重建索引";
+"tray.checkUpdates" = "检查更新…";
+"tray.quit" = "退出";
 
 /* AppDelegate - main menu: app */
+"menu.preferences" = "偏好设置…";
+"menu.rebuildIndex" = "重建索引";
+"menu.quit" = "退出 Lokii";
 "menu.about" = "关于 Lokii";
 
 /* AppDelegate - main menu: edit */
@@ -16,6 +21,7 @@
 "menu.window" = "窗口";
 "menu.close" = "关闭";
 "menu.minimize" = "最小化";
+"menu.resetWindowSize" = "恢复默认窗口大小";
 
 /* AppDelegate - about panel */
 "about.tagline" = "macOS 即时文件搜索";
@@ -35,12 +41,17 @@
 "prefs.hideOnBlur" = "失去焦点时隐藏";
 "prefs.hideOnBlur.description" = "切换到其他应用后自动收起窗口，保持桌面更清爽。";
 "prefs.rememberPosition" = "记住窗口位置";
-"prefs.rememberPosition.description" = "重新打开 Lokii 时恢复到你上次摆放的位置和大小。";
+"prefs.rememberPosition.description" = "关闭时，每次呼出窗口都会回到当前屏幕居中偏上位置；开启后则保持上次拖动的位置。";
+"prefs.windowSize" = "窗口大小";
+"prefs.windowSize.description" = "窗口尺寸按不同显示器分辨率独立记忆，在各屏幕呼出时自动适配。";
+"prefs.windowSize.reset" = "恢复默认大小";
 "prefs.defaultTerminal" = "默认终端";
 "prefs.defaultTerminal.description" = "指定在终端中打开目录时优先唤起的应用程序。";
 "prefs.defaultTerminal.chooseOther" = "选取其他应用...";
 
 "prefs.section.search" = "搜索";
+"prefs.hideResultsWhenEmpty" = "未输入时隐藏结果列表";
+"prefs.hideResultsWhenEmpty.description" = "打开窗口且搜索框为空时，不展示最近修改文件列表，改为显示常用搜索语法提示。";
 "prefs.maxResults" = "最大搜索结果数";
 "prefs.maxResults.description" = "结果越多，列表越完整；一般保持默认值即可。";
 
@@ -49,6 +60,7 @@
 
 "prefs.section.language" = "语言";
 "prefs.language" = "语言";
+"prefs.language.description" = "设置应用显示语言";
 "prefs.language.zh-Hans" = "中文";
 "prefs.language.en" = "English";
 
@@ -61,14 +73,21 @@
 "prefs.excludePatterns.editor.confirm" = "保存";
 "prefs.excludePatterns.editor.cancel" = "取消";
 "prefs.includeHidden" = "索引隐藏文件";
-"prefs.includeHidden.description" = "包含以点开头的文件和目录，例如 `.ssh`、`.config`。";
+"prefs.includeHidden.description" = "包含以点开头的文件和目录，例如 .config、.zshrc。";
+"prefs.excludeSensitive" = "保护凭据目录";
+"prefs.excludeSensitive.description" = "开启隐藏文件索引时，仍排除 .ssh、.gnupg、.aws、.kube 等凭据目录。";
 "prefs.networkRescan" = "网络卷重扫间隔";
 "prefs.networkRescan.description" = "网络共享等非本地卷上的远端改动无法实时感知，按此间隔整体重扫这些索引目录。";
 "prefs.networkRescan.minutes" = "%d 分钟";
+"prefs.networkRescan.unit" = "分钟";
 "prefs.networkRescan.off" = "关闭";
 "prefs.index.unsaved" = "有未保存的更改";
+"prefs.index.saveFailed" = "保存索引配置失败，请重试";
 "prefs.resetToDefaults" = "恢复默认";
 "prefs.save" = "保存";
+"prefs.saveAndRebuild" = "保存并重建";
+"prefs.index.rebuildNow" = "重建索引";
+"prefs.index.rebuildNow.help" = "立即重新扫描所有已保存的本地索引目录";
 "prefs.unsavedChanges.title" = "索引更改尚未保存";
 "prefs.unsavedChanges.message" = "你对索引路径、排除规则或隐藏文件选项的修改还没有保存。";
 "prefs.unsavedChanges.save" = "保存";
@@ -94,6 +113,7 @@
 /* SearchWindow - toolbar & view options */
 "search.toggleSidebar" = "切换侧边栏";
 "search.rebuildIndex" = "重建索引";
+"search.rebuildIndex.tooltip" = "重建索引 (⌘⇧R)";
 "window.viewOptions" = "视图选项";
 "window.resetSize" = "恢复默认窗口大小";
 "menu.zoomIn" = "放大字号";
@@ -119,8 +139,35 @@
 "search.matchedCount.one" = "已匹配 1 项";
 "search.statusWithMatches" = "%1$@ | %2$@";
 "search.indexReady" = "索引已就绪";
-"search.empty.title" = "未找到匹配项";
+"search.empty.title" = "没有找到匹配的文件";
 "search.empty.subtitle" = "请检查拼写、尝试使用模糊匹配模式，或按 ⌥F 调整过滤条件";
+"search.empty.subtitleWithQuery" = "没有找到与“%@”匹配的文件";
+"search.empty.action.checkKeyword.title" = "检查关键词";
+"search.empty.action.checkKeyword.subtitle" = "确认拼写或重新输入";
+"search.empty.action.tryFuzzy.title" = "尝试模糊匹配";
+"search.empty.action.tryFuzzy.subtitle" = "允许跳字容错匹配";
+"search.empty.action.tryFuzzy.activeSubtitle" = "已开启模糊匹配模式";
+"search.empty.action.checkFilters.title" = "检查过滤条件";
+"search.empty.action.checkFilters.subtitle" = "调整文件类型或大小筛选";
+"search.empty.action.checkScope.title" = "确认索引范围";
+"search.empty.action.checkScope.subtitle" = "检查目标目录是否已索引";
+"search.empty.excluded.title" = "此位置未被索引";
+"search.empty.excluded.subtitle" = "当前搜索路径命中了索引排除规则，暂时无法搜索此位置的文件。";
+"search.empty.excluded.tag" = "排除规则";
+"search.empty.manageRules" = "管理索引规则";
+"search.empty.indexing.title" = "正在建立索引";
+"search.empty.indexing.subtitle" = "索引尚未完成，部分文件暂时无法搜索，请稍候。";
+"search.empty.idle.title" = "搜索任何文件";
+"search.empty.idle.subtitle" = "输入文件名、扩展名或使用搜索语法";
+"search.empty.idle.section.syntax" = "试试这样搜索";
+"search.empty.idle.section.recent" = "最近搜索";
+"search.empty.idle.clearHistory" = "清空历史";
+"search.empty.idle.tip.wildcard" = "查找 PDF 文件";
+"search.empty.idle.tip.ext" = "按扩展名筛选";
+"search.empty.idle.tip.or" = "匹配任意关键词";
+"search.empty.idle.tip.size" = "按文件大小筛选";
+"search.empty.idle.tip.exclude" = "排除指定目录";
+"search.empty.idle.tip.scope" = "限定搜索范围";
 "search.toolbar.pin" = "置顶视窗";
 "search.caseSensitivity.auto" = "大小写敏感: 自动";
 "search.caseSensitivity.autoActive" = "大小写敏感: 自动 (检测到大写)";
@@ -171,7 +218,10 @@
 "search.col.name" = "名称";
 "search.col.path" = "路径";
 "search.col.dateModified" = "修改日期";
+"search.col.dateCreated" = "创建日期";
+"search.col.extension" = "扩展名";
 "search.col.size" = "大小";
+"search.col.resetDefault" = "恢复默认列";
 
 /* FDAGuideWindowController */
 "fda.windowTitle" = "将 Lokii 添加到完全磁盘访问权限";
@@ -187,6 +237,9 @@
 /* Preferences - About & Group Titles */
 "prefs.tab.about" = "关于";
 "prefs.index.group.paths" = "索引路径";
+"prefs.index.applications" = "索引应用程序";
+"prefs.index.applications.description" = "加入 /Applications 与系统应用目录；应用包内部不会被索引。";
+"prefs.index.applications.conflict" = "开关已打开，但相关目录被排除路径或排除名单挡住，当前不会生效。";
 "prefs.index.group.excludes" = "排除规则";
 "prefs.index.group.excludePaths" = "排除路径";
 "prefs.index.group.excludePaths.description" = "跳过匹配前缀的整个目录树，避免遍历巨型系统或缓存文件夹。";
@@ -221,6 +274,7 @@
 
 /* Preferences - Appearance */
 "prefs.section.appearance" = "外观";
+"prefs.section.appearanceAndLanguage" = "外观与语言";
 "prefs.appearance" = "外观";
 "prefs.appearance.description" = "选择 Lokii 的显示外观";
 "prefs.appearance.system" = "跟随系统";
@@ -277,7 +331,10 @@
 "prefs.cli.conflict" = "%@ 已存在且不是软链接，请先手动移除。";
 "prefs.cli.status.installed" = "已安装";
 "prefs.cli.status.notInstalled" = "未安装";
-"prefs.cli.uninstall" = "移除";
+"prefs.cli.uninstall" = "移除…";
+"prefs.cli.uninstallConfirm.title" = "移除命令行工具？";
+"prefs.cli.uninstallConfirm.message" = "将移除 %@ 软链接，不会影响 Lokii 应用本身。";
+"prefs.cli.uninstallConfirm.confirm" = "移除";
 "prefs.cli.notOurSymlink" = "%@ 指向的目标不是 Lokii 的内置命令行程序，已中止移除以防止误删。";
 "prefs.cli.readLinkFailed" = "无法解析 %@ 软链接的目标地址。";
 "prefs.section.terminalAndIntegration" = "终端与集成";
@@ -294,3 +351,31 @@
 "prefs.cli.error.permission" = "管理员权限授权失败";
 "prefs.cli.error.uninstallFailed" = "卸载命令行工具失败";
 "prefs.cli.error.notOurSymlink" = "目标软链接不属于本应用";
+
+/* Mounted Volumes & Offline Search */
+"search.result.offline" = "未连接";
+"search.offline.actionBlocked" = "磁盘或网络卷已断开，无法执行此文件操作";
+"search.offline.openFailedTitle" = "无法打开项目";
+"prefs.volume.status.online" = "在线（%@ 项）";
+"prefs.volume.status.syncing" = "同步中...";
+"prefs.volume.status.offline" = "已离线 · 索引已保留（%@ 项）";
+"prefs.volume.status.offlineNoCount" = "已离线 · 索引已保留";
+"prefs.volume.state.offlineUncached" = "离线 · 未缓存索引";
+"prefs.volume.status.remounted" = "当前挂载于 %@";
+"prefs.volume.kind.localExternal" = "外置磁盘";
+"prefs.volume.kind.network" = "网络卷";
+"prefs.volume.rescan" = "重新扫描";
+"prefs.volume.clearCache" = "清除缓存";
+"prefs.volume.clearCacheConfirm.title" = "清除离线卷索引缓存？";
+"prefs.volume.clearCacheConfirm.message" = "清除「%@」的缓存索引后，在重新连接并扫描该卷之前将无法离线检索其中的文件。";
+"prefs.volume.clearCacheConfirm.confirm" = "清除缓存";
+"prefs.volume.errorTitle" = "卷操作失败";
+"prefs.volume.actionFailed" = "无法完成卷操作";
+"prefs.index.pathChecking" = "检查中...";
+"prefs.index.group.volumes" = "外置磁盘与网络卷";
+"prefs.index.group.volumes.description" = "开启后按独立分片索引该卷，断开后保留离线缓存供检索。";
+"prefs.volume.empty" = "未检测到已挂载的外置磁盘或网络卷";
+"prefs.volume.status.notIndexed" = "未加入索引";
+"prefs.volume.status.pendingSave" = "待保存生效";
+"prefs.volume.includeOffline" = "包含离线卷结果";
+"prefs.volume.includeOffline.description" = "外置磁盘或网络卷断开后，仍在搜索结果中保留已缓存的文件。";

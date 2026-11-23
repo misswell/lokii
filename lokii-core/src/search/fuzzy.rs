@@ -24,7 +24,76 @@ pub fn search(
     search_index(&read, query, filter, max_results, case_sensitive)
 }
 
-/// 接收统一快照读锁的模糊检索实现，杜绝锁重入与快照位掩码漂移。
+/// 将 `nucleo_matcher` 产出的索引位置转换为原始字符串 `orig` 中的安全 UTF-8 字符簇字节区间。
+/// 纯 ASCII 走零分配直接坐标映射；非 ASCII 外层单次收集 `orig` 与 `norm` 字符簇数组，
+/// 消除循环内重复 `grapheme_indices().collect()` 堆分配。
+fn map_fuzzy_indices_to_orig(
+    orig: &str,
+    norm: &str,
+    haystack: Utf32Str<'_>,
+    indices: &[u32],
+) -> Vec<(usize, usize)> {
+    if orig.is_ascii() && norm.is_ascii() && orig.len() == norm.len() {
+        return indices
+            .iter()
+            .filter_map(|&idx| {
+                let start = idx as usize;
+                (start < orig.len()).then_some((start, start + 1))
+            })
+            .collect();
+    }
+    use unicode_segmentation::UnicodeSegmentation;
+    let orig_graphemes: Vec<(usize, &str)> = orig.grapheme_indices(true).collect();
+    let norm_graphemes: Vec<(usize, &str)> = norm.grapheme_indices(true).collect();
+    let is_ascii_haystack = matches!(haystack, Utf32Str::Ascii(_));
+
+    if orig_graphemes.len() == norm_graphemes.len() {
+        return indices
+            .iter()
+            .filter_map(|&idx| {
+                let idx = idx as usize;
+                let g_idx = if is_ascii_haystack {
+                    let pos = norm_graphemes.partition_point(|&(gs, _)| gs < idx);
+                    norm_graphemes
+                        .get(pos)
+                        .filter(|&&(gs, _)| gs == idx)
+                        .map(|_| pos)?
+                } else {
+                    idx
+                };
+                let &(og_start, og) = orig_graphemes.get(g_idx)?;
+                Some((og_start, og_start + og.len()))
+            })
+            .collect();
+    }
+
+    indices
+        .iter()
+        .filter_map(|&idx| {
+            let idx = idx as usize;
+            let (norm_start, norm_end) = if is_ascii_haystack {
+                let pos = norm_graphemes.partition_point(|&(gs, _)| gs < idx);
+                let end = norm_graphemes
+                    .get(pos)
+                    .filter(|&&(gs, _)| gs == idx)
+                    .map(|&(gs, g)| gs + g.len())
+                    .unwrap_or_else(|| (idx + 1).min(norm.len()));
+                (idx, end)
+            } else {
+                let &(gs, g) = norm_graphemes.get(idx)?;
+                (gs, gs + g.len())
+            };
+            super::map_norm_span_with_graphemes(
+                &orig_graphemes,
+                norm,
+                norm_start,
+                norm_end,
+            )
+        })
+        .collect()
+}
+
+/// 接收统一快照读锁的模糊检索实现，委托结构化正向词元实现以避免重复路径。
 pub fn search_index(
     read: &CompactIndex,
     query: &str,
@@ -32,11 +101,81 @@ pub fn search_index(
     max_results: usize,
     case_sensitive: bool,
 ) -> Vec<AdvancedSearchResult> {
-    let query = query.trim();
-    if query.is_empty() || max_results == 0 {
+    let tokens: Vec<super::filter::QueryToken> = query
+        .split_whitespace()
+        .map(|s| super::filter::QueryToken {
+            text: s.to_string(),
+            quoted: false,
+            negated: false,
+            raw: s.to_string(),
+            had_escaped_meta: false,
+            was_sanitized_pasted_path: false,
+        })
+        .collect();
+    search_index_tokens(read, &tokens, filter, max_results, case_sensitive)
+}
+
+/// 基于结构化正向词元的模糊检索实现：仅正向词元参与模式构造与隐藏文件瞄准判定（`!.hidden` 不消除隐藏惩罚）。
+pub fn search_index_tokens(
+    read: &CompactIndex,
+    positive_tokens: &[super::filter::QueryToken],
+    filter: &CompiledRecordFilter,
+    max_results: usize,
+    case_sensitive: bool,
+) -> Vec<AdvancedSearchResult> {
+    search_index_tokens_inner(
+        read,
+        positive_tokens,
+        filter,
+        max_results,
+        case_sensitive,
+        None,
+    )
+    .into_iter()
+    .map(|(result, _)| result)
+    .collect()
+}
+
+pub(crate) fn search_index_tokens_raw(
+    read: &CompactIndex,
+    positive_tokens: &[super::filter::QueryToken],
+    filter: &CompiledRecordFilter,
+    max_results: usize,
+    case_sensitive: bool,
+    seen: &std::collections::HashSet<String>,
+) -> Vec<(AdvancedSearchResult, u32)> {
+    search_index_tokens_inner(
+        read,
+        positive_tokens,
+        filter,
+        max_results,
+        case_sensitive,
+        Some(seen),
+    )
+}
+
+fn search_index_tokens_inner(
+    read: &CompactIndex,
+    positive_tokens: &[super::filter::QueryToken],
+    filter: &CompiledRecordFilter,
+    max_results: usize,
+    case_sensitive: bool,
+    raw_order_excluding: Option<&std::collections::HashSet<String>>,
+) -> Vec<(AdvancedSearchResult, u32)> {
+    if positive_tokens.is_empty() || max_results == 0 {
         return Vec::new();
     }
-    let query_cjk = crate::cjk::to_simplified_str(query);
+    let joined: String = positive_tokens
+        .iter()
+        .map(|t| t.text.as_str())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let query = joined.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query_norm = crate::cjk::normalize_and_simplify_cow(query);
     let case_matching = if case_sensitive {
         CaseMatching::Respect
     } else {
@@ -44,46 +183,135 @@ pub fn search_index(
     };
     let mut matcher = Matcher::new(Config::DEFAULT);
     let pattern = Pattern::new(
-        &query_cjk,
+        &query_norm,
         case_matching,
         Normalization::Smart,
         AtomKind::Fuzzy,
     );
     // Fuzzy 匹配：由 NameSignature 内部统一封装查询串特征位构造
-    let req = crate::string_pool::NameSignature::from_fuzzy_query(&query_cjk);
+    let req = crate::string_pool::NameSignature::from_fuzzy_query(&query_norm);
+    let targets_hidden = positive_tokens.iter().any(|t| t.text.starts_with('.'));
+    let rank_ctx = super::ranking::RecordRankContext::default();
     let mut buffer = Vec::new();
-    let matches = super::rank_unique_names(read, filter, max_results, req, |name, _| {
-        let name_cjk = crate::cjk::to_simplified_str(name);
-        let haystack = Utf32Str::new(&name_cjk, &mut buffer);
+    let mut score_name = |name: &str, folded: Option<&str>| {
+        // 大小写无关模式下直接复用 QueryIndex 预缓存的非 ASCII 折叠串（已完成 NFC 合成与繁简转换），
+        // 避免对每个 macOS NFD 文件名重复做堆分配归一化；ASCII 名直接借用原串保留驼峰边界奖励。
+        let name_target: std::borrow::Cow<'_, str> = if !case_sensitive {
+            if let Some(f) = folded {
+                std::borrow::Cow::Borrowed(f)
+            } else if name.is_ascii() {
+                std::borrow::Cow::Borrowed(name)
+            } else {
+                crate::cjk::normalize_and_simplify_cow(name)
+            }
+        } else if name.is_ascii() {
+            std::borrow::Cow::Borrowed(name)
+        } else {
+            crate::cjk::normalize_and_simplify_cow(name)
+        };
+        let haystack = Utf32Str::new(&name_target, &mut buffer);
         pattern.score(haystack, &mut matcher)
-    });
+    };
+    let matches: Vec<_> = if let Some(seen) = raw_order_excluding {
+        let mut top = super::top_k::TopK::new(max_results);
+        let mut path = String::new();
+        let query_index = read.query_index();
+        let records = read.records();
+        let passthrough = filter.is_passthrough();
+        for &name_id in &read.sorted_names().ids {
+            if read
+                .name_signature(name_id)
+                .is_some_and(|sig| !sig.contains(req))
+            {
+                continue;
+            }
+            let Some((name, folded)) = read.name_entry(name_id) else {
+                continue;
+            };
+            let Some(raw_score) = score_name(name, folded) else {
+                continue;
+            };
+            for &ordinal in read.entries_for_name(name_id) {
+                let ordinal = ordinal as usize;
+                let record = &records[ordinal];
+                if !passthrough && !filter.matches_record_in(read, record, Some(name)) {
+                    continue;
+                }
+                let Some(view) = read.view(crate::compact_index::EntryId(ordinal)) else {
+                    continue;
+                };
+                if !seen.is_empty() {
+                    view.path_into(&mut path);
+                    if seen.contains(&path) {
+                        continue;
+                    }
+                }
+                top.offer_path(ordinal, raw_score, view);
+            }
+        }
+        top.finish()
+            .into_iter()
+            .map(|candidate| {
+                let record = &records[candidate.ordinal];
+                let name = read.record_name(record);
+                let base = super::ranking::BaseNameScore::for_fuzzy(name, candidate.score);
+                let (parent_depth, parent_hidden) = read.record_parent_meta(record, query_index);
+                let display_score = super::ranking::score_record_with_meta(
+                    base,
+                    record.is_dir,
+                    parent_depth,
+                    parent_hidden,
+                    &rank_ctx,
+                    targets_hidden,
+                    0,
+                );
+                (candidate.ordinal, display_score, candidate.score)
+            })
+            .collect()
+    } else {
+        super::rank_unique_names(
+            read,
+            filter,
+            max_results,
+            req,
+            targets_hidden,
+            &rank_ctx,
+            |name, folded| {
+                score_name(name, folded)
+                    .map(|raw| super::ranking::BaseNameScore::for_fuzzy(name, raw))
+            },
+        )
+        .into_iter()
+        .map(|candidate| (candidate.ordinal, candidate.score, 0))
+        .collect()
+    };
     let mut indices = Vec::new();
     matches
         .into_iter()
-        .map(|candidate| {
-            let view = read
-                .view(crate::compact_index::EntryId(candidate.ordinal))
-                .unwrap();
-            let name_cjk = crate::cjk::to_simplified_str(view.name);
-            let haystack = Utf32Str::new(&name_cjk, &mut buffer);
+        .map(|(ordinal, score, raw_score)| {
+            let view = read.view(crate::compact_index::EntryId(ordinal)).unwrap();
+            let name_norm = crate::cjk::normalize_and_simplify_cow(view.name);
+            let haystack = Utf32Str::new(&name_norm, &mut buffer);
             indices.clear();
             pattern.indices(haystack, &mut matcher, &mut indices);
-            let positions = indices
-                .iter()
-                .filter_map(|&ordinal| {
-                    view.name
-                        .char_indices()
-                        .nth(ordinal as usize)
-                        .map(|(start, character)| (start, start + character.len_utf8()))
-                })
-                .collect();
-            AdvancedSearchResult {
+            let positions = if !indices.is_empty() || case_sensitive {
+                map_fuzzy_indices_to_orig(view.name, &name_norm, haystack, &indices)
+            } else {
+                // 极少数特殊大小写折叠字符（如 'İ'）在折叠串命中后回退至折叠串反投影高亮
+                let name_folded = crate::cjk::fold_cow(view.name);
+                let folded_haystack = Utf32Str::new(&name_folded, &mut buffer);
+                indices.clear();
+                pattern.indices(folded_haystack, &mut matcher, &mut indices);
+                map_fuzzy_indices_to_orig(view.name, &name_folded, folded_haystack, &indices)
+            };
+            let result = AdvancedSearchResult {
                 entry: view.materialize(),
-                score: (candidate.score as f64 / 1000.0).min(1.0),
+                score: score.to_f64(),
                 match_positions: positions,
                 parent_match_positions: Vec::new(),
                 search_mode: SearchMode::Fuzzy,
-            }
+            };
+            (result, raw_score)
         })
         .collect()
 }

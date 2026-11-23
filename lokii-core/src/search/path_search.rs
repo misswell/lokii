@@ -1,28 +1,38 @@
 use crate::compact_index::{split_path, CompactIndex, EntryId};
-use crate::indexer::{IndexStore, MatchScore};
-use crate::search::path_query::PathQuery;
+use crate::indexer::IndexStore;
+use crate::search::path_query::{PathCandidate, PathQuery};
+use crate::search::ranking::{
+    self, BaseNameScore, MatchTier, RecordRankContext, PATH_BONUS_ANCESTOR, PATH_BONUS_DIRECT,
+};
 use crate::search::top_k::TopK;
 use crate::search::{find_positions, AdvancedSearchResult, CompiledRecordFilter, SearchMode};
 use crate::string_pool::NameSignature;
 
-/// 目录实体自身命中时的基准分。
-const SCORE_DIR_SELF: u32 = 500;
-/// 父目录恰为查询目标目录时的基准分。
-const SCORE_DIRECT_PARENT: u32 = 400;
-/// 父目录仅为查询目标目录的祖先时的基准分。
-const SCORE_ANCESTOR_PARENT: u32 = 300;
-/// 文件名精确匹配的基准分。
-const SCORE_NAME_EXACT: u32 = 300;
-/// 文件名前缀匹配或通配符命中的基准分。
-const SCORE_NAME_PREFIX: u32 = 200;
-/// 文件名包含匹配的基准分。
-const SCORE_NAME_SUBSTRING: u32 = 100;
-/// 父目录恰为查询目标目录时的加成。
-const PATH_BONUS_DIRECT: u32 = 150;
-/// 父目录仅为查询目标目录的祖先时的加成。
-const PATH_BONUS_ANCESTOR: u32 = 50;
-/// 归一化基准：文件名精确匹配叠加直接父级加成的上限。
-const MAX_SCORE: f64 = (SCORE_NAME_EXACT + PATH_BONUS_DIRECT) as f64;
+#[inline]
+fn any_segment_starts_with_dot(s: &str) -> bool {
+    s.split(['/', '\\']).any(|seg| seg.starts_with('.'))
+}
+
+#[inline]
+pub(crate) fn path_query_targets_hidden(query: &PathQuery) -> bool {
+    query.name_terms.iter().any(|t| t.starts_with('.'))
+        || query
+            .path_pattern
+            .as_deref()
+            .is_some_and(any_segment_starts_with_dot)
+        || query
+            .scope_prefix
+            .as_deref()
+            .is_some_and(any_segment_starts_with_dot)
+        || query
+            .path_candidates
+            .iter()
+            .any(|c| any_segment_starts_with_dot(&c.pattern))
+        || query
+            .scope_candidates
+            .iter()
+            .any(|c| any_segment_starts_with_dot(&c.pattern))
+}
 
 /// 标识父路径匹配的质量层级。
 #[repr(u8)]
@@ -40,55 +50,126 @@ struct ParentMatch {
     span: (usize, usize),
 }
 
+/// 匹配 `in:` 作用域候选：绝对路径走前缀匹配，相对路径严格要求段边界命中（禁止 `/mydownloads/` 误命中）。
+/// 直接借用预拼接的 `cand.slashed_pattern`（`"/{pat}"`），消除父目录池评估期间的数万次 `format!` 堆分配。
+pub(crate) fn match_scope_candidates(
+    parent_folded: &str,
+    scope_candidates: &[PathCandidate],
+) -> Option<(usize, usize)> {
+    for cand in scope_candidates {
+        let pat = cand.pattern.as_str();
+        if cand.is_absolute || parent_folded.starts_with(pat) {
+            if parent_folded.starts_with(pat) {
+                return Some((0, pat.len()));
+            }
+        } else if let Some(pos) = parent_folded.find(cand.slashed_pattern.as_str()) {
+            let start = pos + 1;
+            return Some((start, start + pat.len()));
+        }
+    }
+    None
+}
+
+/// 针对 `in:<scope>` 作用域计算父路径高亮区间（并剪裁尾随 `/` 以匹配展示串），
+/// 供正则、模糊、并集等正交复用 `in:` 作用域的检索模式展示父路径命中段。
+pub(crate) fn find_scope_highlight_range(
+    parent: &str,
+    scope_candidates: &[PathCandidate],
+) -> Option<(usize, usize)> {
+    if scope_candidates.is_empty() || parent.is_empty() {
+        return None;
+    }
+    let parent_folded = crate::cjk::fold_cow(parent);
+    let (norm_start, norm_end) = match_scope_candidates(&parent_folded, scope_candidates)?;
+    let (start, mut end) =
+        super::map_norm_span_to_orig(parent, &parent_folded, norm_start, norm_end)?;
+    while end > start && parent.as_bytes().get(end - 1) == Some(&b'/') {
+        end -= 1;
+    }
+    (start < end).then_some((start, end))
+}
+
 /// 在父目录上判定约束，同时产出质量层级与高亮区间。
 ///
 /// 绝对路径按前缀命中；相对路径优先取结尾命中的直接父级，其次取中段命中的祖先。
-/// 依据 macOS APFS 特性与 Smart Case 设计，父目录恒定保持大小写不敏感匹配。
+/// 高亮字节区间严格使用最终命中的候选模式字节长度，避免别名长度差异造成 UTF-8 区间越界。
+/// 依据 macOS APFS 特性与 Smart Case 设计，父目录恒定保持大小写无关及 Unicode NFC 等价匹配。
 fn match_parent(parent: &str, query: &PathQuery) -> Option<ParentMatch> {
-    let parent_lower = parent.to_lowercase();
+    let parent_folded = crate::cjk::fold_cow(parent);
 
-    if let Some(ref scope) = query.scope_prefix {
-        if !parent_lower.starts_with(scope.as_str()) {
-            return None;
-        }
-    }
-
-    let Some(ref pat) = query.path_pattern else {
-        // 无父目录模式：作用域本身即直接命中；无约束时为零长区间（不高亮）。
-        return Some(ParentMatch {
-            quality: ParentQuality::Direct,
-            span: query
-                .scope_prefix
-                .as_ref()
-                .map_or((0, 0), |scope| (0, scope.len())),
-        });
+    let scope_norm_span = if !query.scope_candidates.is_empty() {
+        Some(match_scope_candidates(&parent_folded, &query.scope_candidates)?)
+    } else {
+        None
     };
 
-    if query.is_absolute_prefix {
-        if !parent_lower.starts_with(pat.as_str()) {
-            return None;
-        }
-        let quality = if parent_lower == pat.as_str() {
-            ParentQuality::Direct
-        } else {
-            ParentQuality::Ancestor
-        };
-        Some(ParentMatch {
-            quality,
-            span: (0, pat.len()),
-        })
-    } else if parent_lower.ends_with(pat.as_str()) {
-        Some(ParentMatch {
+    if query.path_candidates.is_empty() {
+        // 无父目录模式：作用域本身即直接命中；无约束时为零长区间（不高亮）。
+        let span = scope_norm_span
+            .and_then(|(s, e)| super::map_norm_span_to_orig(parent, &parent_folded, s, e))
+            .unwrap_or((0, 0));
+        return Some(ParentMatch {
             quality: ParentQuality::Direct,
-            span: (parent.len() - pat.len(), parent.len()),
-        })
-    } else {
-        let start = parent_lower.find(pat.as_str())?;
-        Some(ParentMatch {
-            quality: ParentQuality::Ancestor,
-            span: (start, start + pat.len()),
-        })
+            span,
+        });
     }
+
+    let mut best: Option<(ParentQuality, usize, usize)> = None;
+    for cand in &query.path_candidates {
+        let pat = cand.pattern.as_str();
+        let matched = if cand.is_absolute {
+            if !parent_folded.starts_with(pat) {
+                continue;
+            }
+            let quality = if parent_folded.as_ref() == pat {
+                ParentQuality::Direct
+            } else {
+                ParentQuality::Ancestor
+            };
+            (quality, 0, pat.len())
+        } else if cand.require_segment_boundary {
+            let boundary_suffix = cand.slashed_pattern.as_str();
+            if parent_folded.as_ref() == pat || parent_folded.ends_with(boundary_suffix) {
+                (
+                    ParentQuality::Direct,
+                    parent_folded.len() - pat.len(),
+                    parent_folded.len(),
+                )
+            } else if parent_folded.starts_with(pat) {
+                (ParentQuality::Ancestor, 0, pat.len())
+            } else if let Some(pos) = parent_folded.find(boundary_suffix) {
+                let start = pos + 1;
+                (ParentQuality::Ancestor, start, start + pat.len())
+            } else {
+                continue;
+            }
+        } else if parent_folded.ends_with(pat) {
+            (
+                ParentQuality::Direct,
+                parent_folded.len() - pat.len(),
+                parent_folded.len(),
+            )
+        } else if let Some(start) = parent_folded.find(pat) {
+            (ParentQuality::Ancestor, start, start + pat.len())
+        } else {
+            continue;
+        };
+
+        let replace = match best {
+            None => true,
+            Some((prev_q, _, _)) => (matched.0 as u8) > (prev_q as u8),
+        };
+        if replace {
+            best = Some(matched);
+            if matched.0 == ParentQuality::Direct {
+                break;
+            }
+        }
+    }
+
+    let (quality, norm_start, norm_end) = best?;
+    let span = super::map_norm_span_to_orig(parent, &parent_folded, norm_start, norm_end)?;
+    Some(ParentMatch { quality, span })
 }
 
 /// 预判单个父目录的约束质量。
@@ -102,39 +183,70 @@ pub(crate) fn evaluate_parent_quality(
     }
 }
 
-/// 当前目录实体是否正是查询的目标目录（如 "Desktop/"）。
+/// 当前目录实体是否正是查询的目标目录（如 "Desktop/" 或 "桌面/"）。
+/// 先比对末级目录名再延迟折叠父路径，过滤 99.9%+ 无关目录并消除绝对路径判断的 `format!` 堆分配。
 pub(crate) fn is_target_directory_self(
     parent: &str,
     name: &str,
     query: &PathQuery,
 ) -> bool {
-    if !query.is_dir_only {
+    if !query.is_dir_only || query.path_candidates.is_empty() {
         return false;
     }
-    let Some(ref pat) = query.path_pattern else {
-        return false;
-    };
-    let pat_clean = pat.trim_end_matches('/');
-    let target_name = split_path(pat_clean).1;
-    // 目录名匹配恒定大小写无关
-    if !name.eq_ignore_ascii_case(target_name) {
+    let name_folded = crate::cjk::fold_cow(name);
+    let any_name_match = query.path_candidates.iter().any(|cand| {
+        let pat_clean = cand.pattern.trim_end_matches('/');
+        split_path(pat_clean).1 == name_folded.as_ref()
+    });
+    if !any_name_match {
         return false;
     }
-    let parent_lower = parent.to_lowercase();
+
+    let parent_folded = crate::cjk::fold_cow(parent);
+
     // in: 作用域校验
-    if let Some(ref scope) = query.scope_prefix {
-        if !parent_lower.starts_with(scope.as_str()) {
-            return false;
+    if !query.scope_candidates.is_empty()
+        && match_scope_candidates(&parent_folded, &query.scope_candidates).is_none()
+    {
+        return false;
+    }
+
+    for cand in &query.path_candidates {
+        let pat = cand.pattern.as_str();
+        let pat_clean = pat.trim_end_matches('/');
+        let (dir_part, target_name) = split_path(pat_clean);
+        // 目录名匹配恒定大小写无关且 NFC 等价
+        if name_folded.as_ref() != target_name {
+            continue;
+        }
+        if cand.is_absolute {
+            if parent_folded.len() >= pat.len() {
+                if parent_folded.starts_with(pat) {
+                    return true;
+                }
+            } else if let Some(rest) = pat.strip_prefix(parent_folded.as_ref()) {
+                if rest == name_folded.as_ref() || rest.strip_suffix('/') == Some(name_folded.as_ref()) {
+                    return true;
+                }
+            }
+        } else {
+            if dir_part.is_empty() {
+                return true;
+            }
+            if cand.require_segment_boundary {
+                // 多段相对别名须在路径段边界匹配，避免 "my/桌面/" 误命中 ".../dummy/Desktop"
+                if parent_folded
+                    .strip_suffix(dir_part)
+                    .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+                {
+                    return true;
+                }
+            } else if parent_folded.ends_with(dir_part) {
+                return true;
+            }
         }
     }
-    // 相对或绝对路径前缀匹配
-    if query.is_absolute_prefix {
-        let full = format!("{parent_lower}{}/", name.to_lowercase());
-        full.starts_with(pat.as_str())
-    } else {
-        let (dir_part, _) = split_path(pat_clean);
-        dir_part.is_empty() || parent_lower.ends_with(dir_part)
-    }
+    false
 }
 
 /// 计算父目录高亮区间，并剪裁末尾 '/' 以匹配前端展示串。
@@ -151,8 +263,9 @@ pub(crate) fn find_parent_highlight_range(
     (start < end).then_some((start, end))
 }
 
-/// 对单个文件名打分，返回未叠加路径加成的基准分；未命中返回 `None`。
-fn score_name(
+/// 对单个文件名打分，返回文件名级复合排序基分；未命中返回 `None`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn score_name(
     name: &str,
     folded: Option<&str>,
     query: &PathQuery,
@@ -161,10 +274,10 @@ fn score_name(
     ascii_buf: &mut Vec<u8>,
     case_sensitive: bool,
     explicit_lock: bool,
-) -> Option<u32> {
+) -> Option<BaseNameScore> {
     if has_wildcard {
         let name_lower_cow: std::borrow::Cow<'_, str> = if case_sensitive {
-            std::borrow::Cow::Borrowed(name)
+            crate::cjk::normalize_and_simplify_cow(name)
         } else if let Some(f) = folded {
             std::borrow::Cow::Borrowed(f)
         } else if name.is_ascii() {
@@ -181,21 +294,17 @@ fn score_name(
                 name_lower_cow.contains(term.as_str())
             }
         });
-        return all_matched.then_some(SCORE_NAME_PREFIX);
+        return all_matched.then(|| BaseNameScore::for_tier_only(name, MatchTier::Prefix, 0));
     }
-    let matched_score = crate::indexer::score_match_zero_alloc(
+    ranking::score_name_rank(
         name,
         folded,
         &query.name_terms,
+        &query.raw_name_terms,
         all_terms_ascii,
         case_sensitive,
         explicit_lock,
-    );
-    matched_score.map(|score| match score {
-        MatchScore::Exact => SCORE_NAME_EXACT,
-        MatchScore::Prefix => SCORE_NAME_PREFIX,
-        MatchScore::Substring => SCORE_NAME_SUBSTRING,
-    })
+    )
 }
 
 /// 执行路径感知流式检索。
@@ -225,11 +334,26 @@ pub fn search_index(
         return Vec::new();
     }
 
+    // 预编译扩展名槽位匹配器：若查询指定扩展名但索引池无对应槽位，直接短路返回空
+    let ext_matcher = match query.extension.as_deref() {
+        Some(ext) => match super::substring::ExtMatcher::compile(read, ext) {
+            Some(m) => Some(m),
+            None => return Vec::new(),
+        },
+        None => None,
+    };
+
     // 阶段 0：父目录池预判
-    // 每个父目录只判定一次，状态表约 30KB，常驻 L1 缓存。
+    // 每个父目录只判定一次，状态表常驻 L1 缓存。
     let parent_status = read.evaluate_parents(ParentQuality::None, |parent| {
         evaluate_parent_quality(parent, query)
     });
+
+    let has_raw_paths = read.pool_counts().3 > 0;
+    let any_parent_hit = parent_status.iter().any(|&q| q != ParentQuality::None);
+    if !any_parent_hit && !query.is_dir_only && !has_raw_paths {
+        return Vec::new();
+    }
 
     // 通配符判定只依赖查询，提到循环外。
     let has_wildcard = query
@@ -240,152 +364,240 @@ pub fn search_index(
 
     let mut top_k = TopK::new(max_results);
     let mut ascii_buf = Vec::with_capacity(128);
-
-    // 宽路径下大量记录共用同一批文件名：每个唯一名只判定一次，首次判定前先过签名预筛。
-    // 0 表示尚未判定；同名记录得分相同，原始路径记录的名字不在名字池里，不走这张表。
-    const NAME_UNSCORED: u16 = 0;
-    const NAME_MISS: u16 = 1;
+    let rank_ctx = RecordRankContext::default();
+    let targets_hidden = path_query_targets_hidden(query);
+    let passthrough = filter.is_passthrough();
+    let allow_dirs = filter.allow_dirs();
     let query_index = read.query_index();
-    let required_signature = query.name_terms.iter().fold(NameSignature::default(), |sig, term| {
-        let term_lower = term.to_lowercase();
-        sig.union(if term.contains('*') || term.contains('?') {
-            crate::search::wildcard::required_signature_for_glob(&term_lower)
-        } else {
-            NameSignature::from_substring_query(&term_lower)
-        })
-    });
-    let mut name_scores = if query.name_terms.is_empty() {
-        Vec::new()
-    } else {
-        vec![NAME_UNSCORED; query_index.slot_count()]
-    };
+    let records = read.records();
 
-    // 阶段 1：单趟扫描记录
-    for (ordinal, record) in read.records().iter().enumerate() {
-        if !filter.matches_record(record, || Some(read.record_name(record))) {
-            continue;
-        }
+    if !query.name_terms.is_empty() {
+        // 阶段 1A：带文件名路径检索（如 "src/main.rs"、"in:Desktop report"）走 QueryIndex CSR 倒排 + 128 位签名 + 上界剪枝，
+        // 跳过 95%+ 无关文件名并免除全表百万记录扫描；raw_path 记录随后单独补扫保证语义 100% 完备。
+        let required_signature = query.name_terms.iter().fold(NameSignature::default(), |sig, term| {
+            sig.union(if term.contains('*') || term.contains('?') {
+                crate::search::wildcard::required_signature_for_glob(term)
+            } else {
+                NameSignature::from_substring_query(term)
+            })
+        });
 
-        // 1. 查表取父路径匹配质量
-        let parent_quality = if record.raw_path {
-            let (parent, _) = read.split_record(record);
-            evaluate_parent_quality(parent, query)
-        } else {
-            parent_status
-                .get(record.path as usize)
-                .copied()
-                .unwrap_or(ParentQuality::None)
-        };
-
-        // 纯目录查询：判断条目本身是否即目标目录
-        let is_dir_self = query.is_dir_only && record.is_dir && {
-            let (parent, name) = read.split_record(record);
-            is_target_directory_self(parent, name, query)
-        };
-
-        // 非目标目录且父路径不匹配者立即跳过（绝大多数记录在此返回）
-        if !is_dir_self && parent_quality == ParentQuality::None {
-            continue;
-        }
-
-        // 2. 扩展名过滤
-        if let Some(ref expected_ext) = query.extension {
-            let entry_ext = read.extension(record.extension).unwrap_or("");
-            if !entry_ext.eq_ignore_ascii_case(expected_ext) {
+        for name_id in 0..query_index.slot_count() as u32 {
+            let sig = query_index.signature_at(name_id);
+            if sig == NameSignature::default() && !query_index.is_ready(name_id) {
                 continue;
             }
-        }
+            if !sig.contains(required_signature) {
+                continue;
+            }
+            let entries = query_index.entries(name_id);
+            if entries.is_empty() {
+                continue;
+            }
+            let Some(name) = read.name_text(name_id) else {
+                continue;
+            };
+            let folded_opt = if name.is_ascii() {
+                None
+            } else {
+                query_index.folded(name_id)
+            };
+            let Some(base_score) = score_name(
+                name,
+                folded_opt,
+                query,
+                has_wildcard,
+                all_terms_ascii,
+                &mut ascii_buf,
+                case_sensitive,
+                explicit_lock,
+            ) else {
+                continue;
+            };
 
-        // 3. 打分（零分配）
-        let memo_slot = (!record.raw_path).then_some(record.name as usize);
-        let remembered = memo_slot
-            .and_then(|slot| name_scores.get(slot).copied())
-            .unwrap_or(NAME_UNSCORED);
-        if remembered == NAME_MISS {
-            continue;
-        }
-        let raw_folded;
-        let (name, folded_opt) = if record.raw_path {
-            let n = read.record_name(record);
-            if !n.is_ascii() && crate::cjk::needs_fold(n) {
-                raw_folded = Some(crate::cjk::fold_str(n));
-                (n, raw_folded.as_deref())
-            } else {
-                (n, None)
-            }
-        } else {
-            match read.name_entry(record.name) {
-                Some((n, f)) => (n, f),
-                None => ("", None),
-            }
-        };
-        let final_score: u32 = if query.name_terms.is_empty() {
-            // 纯目录模式（如 "Desktop/"）
-            if is_dir_self {
-                SCORE_DIR_SELF
-            } else if parent_quality == ParentQuality::Direct {
-                SCORE_DIRECT_PARENT
-            } else {
-                SCORE_ANCESTOR_PARENT
-            }
-        } else {
-            // 带文件名检索（如 "src/main.rs"）
-            let base_score = if remembered != NAME_UNSCORED {
-                u32::from(remembered)
-            } else {
-                let pruned = !record.raw_path
-                    && query_index
-                        .signature(record.name)
-                        .is_some_and(|signature| !signature.contains(required_signature));
-                let scored = if pruned {
-                    None
-                } else {
-                    score_name(
-                        name,
-                        folded_opt,
-                        query,
-                        has_wildcard,
-                        all_terms_ascii,
-                        &mut ascii_buf,
-                        case_sensitive,
-                        explicit_lock,
-                    )
-                };
-                if let Some(memo) = memo_slot.and_then(|slot| name_scores.get_mut(slot)) {
-                    *memo = scored.map_or(NAME_MISS, |score| score as u16);
+            let upper = base_score.upper_bound_with_extra(
+                &rank_ctx,
+                allow_dirs,
+                targets_hidden,
+                PATH_BONUS_DIRECT,
+            );
+            if let Some(worst) = top_k.worst() {
+                if upper < worst.score || (upper == worst.score && name > worst.name()) {
+                    continue;
                 }
-                let Some(score) = scored else {
+            }
+
+            let (head, tail) = ranking::bucket_slices(entries);
+            for &ordinal in head.iter().chain(tail.iter()) {
+                let ord_usize = ordinal as usize;
+                let Some(record) = records.get(ord_usize) else {
                     continue;
                 };
-                score
+                if record.raw_path {
+                    continue;
+                }
+                let parent_quality = parent_status
+                    .get(record.path as usize)
+                    .copied()
+                    .unwrap_or(ParentQuality::None);
+                let is_dir_self = parent_quality == ParentQuality::None
+                    && query.is_dir_only
+                    && record.is_dir
+                    && is_target_directory_self(read.record_parent(record), name, query);
+                if parent_quality == ParentQuality::None && !is_dir_self {
+                    continue;
+                }
+                if let Some(ref matcher) = ext_matcher {
+                    if !matcher.matches(record.extension) {
+                        continue;
+                    }
+                }
+                if !passthrough && !filter.matches_record_in(read, record, Some(name)) {
+                    continue;
+                }
+
+                let path_bonus = match parent_quality {
+                    ParentQuality::Direct => PATH_BONUS_DIRECT,
+                    ParentQuality::Ancestor => PATH_BONUS_ANCESTOR,
+                    ParentQuality::None => 0,
+                };
+                let (parent_depth, parent_hidden) = read.record_parent_meta(record, query_index);
+                let final_score = ranking::score_record_with_meta(
+                    base_score,
+                    record.is_dir,
+                    parent_depth,
+                    parent_hidden,
+                    &rank_ctx,
+                    targets_hidden,
+                    path_bonus,
+                );
+                top_k.offer(ord_usize, final_score, name);
+            }
+        }
+
+        // 仅当索引中存在非池化原始路径记录（如 alias -> /actual）时补扫，按真实路径末段评估
+        if has_raw_paths {
+            for (ordinal, record) in records.iter().enumerate() {
+                if !record.raw_path {
+                    continue;
+                }
+                let (parent, name) = read.split_record(record);
+                let parent_quality = evaluate_parent_quality(parent, query);
+                let is_dir_self = query.is_dir_only
+                    && record.is_dir
+                    && is_target_directory_self(parent, name, query);
+                if !is_dir_self && parent_quality == ParentQuality::None {
+                    continue;
+                }
+                if let Some(ref matcher) = ext_matcher {
+                    if !matcher.matches(record.extension) {
+                        continue;
+                    }
+                }
+                if !passthrough && !filter.matches_record_in(read, record, Some(name)) {
+                    continue;
+                }
+                let raw_folded = (!name.is_ascii() && crate::cjk::needs_fold(name))
+                    .then(|| crate::cjk::fold_str(name));
+                let Some(base_score) = score_name(
+                    name,
+                    raw_folded.as_deref(),
+                    query,
+                    has_wildcard,
+                    all_terms_ascii,
+                    &mut ascii_buf,
+                    case_sensitive,
+                    explicit_lock,
+                ) else {
+                    continue;
+                };
+                let path_bonus = match parent_quality {
+                    ParentQuality::Direct => PATH_BONUS_DIRECT,
+                    ParentQuality::Ancestor => PATH_BONUS_ANCESTOR,
+                    ParentQuality::None => 0,
+                };
+                let final_score = ranking::score_record_with_extra(
+                    base_score,
+                    record.is_dir,
+                    parent,
+                    &rank_ctx,
+                    targets_hidden,
+                    path_bonus,
+                );
+                top_k.offer(ordinal, final_score, name);
+            }
+        }
+    } else {
+        // 阶段 1B：纯目录列举模式（如 "Desktop/"、"in:src"）：先用父目录状态表快速淘汰 99%+ 非目标记录，再执行过滤器与单字节元数据评分
+        for (ordinal, record) in records.iter().enumerate() {
+            let parent_quality = if record.raw_path {
+                let (parent, _) = read.split_record(record);
+                evaluate_parent_quality(parent, query)
+            } else {
+                parent_status
+                    .get(record.path as usize)
+                    .copied()
+                    .unwrap_or(ParentQuality::None)
             };
 
-            let path_bonus: u32 = match parent_quality {
-                ParentQuality::Direct => PATH_BONUS_DIRECT,
-                ParentQuality::Ancestor => PATH_BONUS_ANCESTOR,
-                ParentQuality::None => 0,
+            let is_dir_self = query.is_dir_only && record.is_dir && {
+                let (parent, name) = read.split_record(record);
+                is_target_directory_self(parent, name, query)
             };
 
-            base_score + path_bonus
-        };
+            if !is_dir_self && parent_quality == ParentQuality::None {
+                continue;
+            }
+            if let Some(ref matcher) = ext_matcher {
+                if !matcher.matches(record.extension) {
+                    continue;
+                }
+            }
+            let name = read.record_name(record);
+            if !passthrough && !filter.matches_record_in(read, record, Some(name)) {
+                continue;
+            }
 
-        top_k.offer(ordinal, final_score, name);
+            // 纯目录模式（如 "Desktop/"）：直属子项取 Prefix 而非 StemExact，避免 .app 子包反向越过目录自身
+            let base = if is_dir_self {
+                BaseNameScore::for_exact_fast_path(name)
+            } else if parent_quality == ParentQuality::Direct {
+                BaseNameScore::for_tier_only(name, MatchTier::Prefix, 0)
+            } else {
+                BaseNameScore::for_tier_only(name, MatchTier::Substring, 0)
+            };
+            let (parent_depth, parent_hidden) = read.record_parent_meta(record, query_index);
+            let final_score = ranking::score_record_with_meta(
+                base,
+                record.is_dir,
+                parent_depth,
+                parent_hidden,
+                &rank_ctx,
+                targets_hidden,
+                0,
+            );
+            top_k.offer(ordinal, final_score, name);
+        }
     }
 
     // 阶段 2：仅对 Top-K 结果计算高亮区间
     let kw_prepared: Vec<(&str, String)> = query
         .name_terms
         .iter()
-        .map(|t| (t.as_str(), t.to_lowercase()))
+        .map(|t| (t.as_str(), crate::cjk::fold_str(t)))
         .collect();
     let kw_refs: Vec<(&str, &str)> = kw_prepared
         .iter()
         .map(|(raw, lower)| (*raw, lower.as_str()))
         .collect();
-    let target_name_opt = query.path_pattern.as_deref().map(|pat| {
-        let target = split_path(pat.trim_end_matches('/')).1;
-        (target, target.to_lowercase())
-    });
+    let target_names: Vec<(&str, String)> = query
+        .path_candidates
+        .iter()
+        .map(|cand| {
+            let target = split_path(cand.pattern.trim_end_matches('/')).1;
+            (target, crate::cjk::fold_str(target))
+        })
+        .collect();
 
     let candidates = top_k.finish();
     candidates
@@ -401,22 +613,35 @@ pub fn search_index(
                 .into_iter()
                 .collect();
 
-            let name_lower = name.to_lowercase();
+            let name_folded = crate::cjk::fold_cow(name);
             let match_positions = if is_dir_self && query.name_terms.is_empty() {
-                // 目标目录实体自身：高亮其末级目录名
-                match target_name_opt.as_ref() {
+                // 目标目录实体自身：优先匹配与真实目录名一致的候选别名并高亮其末级目录名
+                match target_names
+                    .iter()
+                    .find(|(_, tl)| tl.as_str() == name_folded.as_ref())
+                    .or_else(|| target_names.first())
+                {
                     Some((target, target_lower)) => {
-                        find_positions(&view.name, &name_lower, &[(*target, target_lower.as_str())])
+                        find_positions(view.name, &name_folded, &[(*target, target_lower.as_str())])
                     }
                     None => Vec::new(),
                 }
             } else {
-                find_positions(&view.name, &name_lower, &kw_refs)
+                find_positions(view.name, &name_folded, &kw_refs)
+            };
+
+            let score = if query.name_terms.is_empty()
+                && is_dir_self
+                && (targets_hidden || !ranking::is_record_hidden(name, parent))
+            {
+                1.0
+            } else {
+                candidate.score.to_f64()
             };
 
             AdvancedSearchResult {
                 entry: view.materialize(),
-                score: (f64::from(candidate.score) / MAX_SCORE).min(1.0),
+                score,
                 match_positions,
                 parent_match_positions,
                 search_mode: SearchMode::Substring,
@@ -607,5 +832,68 @@ mod tests {
         let names: Vec<&str> = results.iter().map(|r| r.entry.name.as_str()).collect();
         assert!(names.contains(&"notes.txt"));
         assert!(names.contains(&"deep.txt"));
+    }
+
+    #[test]
+    fn test_cn_alias_parent_match_and_relative_in_scope_boundary() {
+        let store = IndexStore::new();
+        store.replace(vec![
+            FileEntry {
+                name: "Desktop".to_string(),
+                path: "/Users/u/Desktop".to_string(),
+                is_dir: true,
+                size: 0,
+                modified: 0,
+                created_at: 0,
+                extension: String::new(),
+            },
+            FileEntry {
+                name: "周报.docx".to_string(),
+                path: "/Users/u/Desktop/周报.docx".to_string(),
+                is_dir: false,
+                size: 100,
+                modified: 0,
+                created_at: 0,
+                extension: "docx".to_string(),
+            },
+            FileEntry {
+                name: "report.pdf".to_string(),
+                path: "/Users/u/Downloads/report.pdf".to_string(),
+                is_dir: false,
+                size: 100,
+                modified: 0,
+                created_at: 0,
+                extension: "pdf".to_string(),
+            },
+            FileEntry {
+                name: "report.pdf".to_string(),
+                path: "/Users/u/mydownloads/report.pdf".to_string(),
+                is_dir: false,
+                size: 100,
+                modified: 0,
+                created_at: 0,
+                extension: "pdf".to_string(),
+            },
+        ]);
+        let read = store.read();
+        let filter = CompiledRecordFilter::compile(&read, &crate::search::filter::QueryFilter::default());
+        drop(read);
+
+        let q_alias = PathQuery::parse("桌面/周报").unwrap();
+        let res_alias = search(&store, &q_alias, &filter, 10);
+        assert_eq!(res_alias.len(), 1);
+        assert_eq!(res_alias[0].entry.path, "/Users/u/Desktop/周报.docx");
+        assert_eq!(res_alias[0].parent_match_positions, vec![(9, 16)]);
+
+        let q_dir_self = PathQuery::parse("桌面/").unwrap();
+        let res_self = search(&store, &q_dir_self, &filter, 10);
+        let paths: Vec<&str> = res_self.iter().map(|r| r.entry.path.as_str()).collect();
+        assert!(paths.contains(&"/Users/u/Desktop"));
+        assert!(paths.contains(&"/Users/u/Desktop/周报.docx"));
+
+        let q_scope = PathQuery::parse("in:下载 report").unwrap();
+        let res_scope = search(&store, &q_scope, &filter, 10);
+        let scope_paths: Vec<&str> = res_scope.iter().map(|r| r.entry.path.as_str()).collect();
+        assert_eq!(scope_paths, vec!["/Users/u/Downloads/report.pdf"]);
     }
 }

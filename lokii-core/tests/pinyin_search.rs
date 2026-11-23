@@ -148,3 +148,218 @@ fn test_wildcard_star_recent_modified_order() {
     assert_eq!(results[1].entry.name, "m_mid.txt");
     assert_eq!(results[2].entry.name, "z_old.txt");
 }
+
+#[test]
+fn test_pinyin_mixed_initials_and_full_search() {
+    let entries = vec![
+        make_entry("截图表.xlsx", "/Users/test/Docs/截图表.xlsx"),
+        make_entry("截图工具", "/Users/test/Apps/截图工具"),
+        make_entry("剪贴板.md", "/Users/test/Docs/剪贴板.md"),
+        make_entry("北京市.pdf", "/Users/test/Docs/北京市.pdf"),
+        make_entry("文件上传.zip", "/Users/test/Downloads/文件上传.zip"),
+        make_entry("工作.txt", "/Users/test/Docs/工作.txt"),
+        make_entry("2026年财务预算表.xlsx", "/Users/test/Docs/2026年财务预算表.xlsx"),
+    ];
+
+    let store = IndexStore::new();
+    store.replace(entries);
+    let filter = CompiledRecordFilter::default();
+
+    let cases = [
+        ("jietb", "截图表.xlsx", "截图表"),
+        ("jiet", "截图工具", "截图"),
+        ("jiantb", "剪贴板.md", "剪贴板"),
+        ("jiant", "剪贴板.md", "剪贴"),
+        ("beijings", "北京市.pdf", "北京市"),
+        ("wenjiansc", "文件上传.zip", "文件上传"),
+        ("gzuo", "工作.txt", "工作"),
+        ("2026ncw", "2026年财务预算表.xlsx", "2026年财务"),
+    ];
+
+    for (query, expected_name, expected_slice) in cases {
+        let results = search(&store, query, &filter, 10);
+        assert!(
+            results.iter().any(|r| r.entry.name == expected_name),
+            "query {query:?} should match {expected_name:?}, got {:?}",
+            results.iter().map(|r| &r.entry.name).collect::<Vec<_>>()
+        );
+        let hit = results
+            .iter()
+            .find(|r| r.entry.name == expected_name)
+            .unwrap();
+        assert!(
+            !hit.match_positions.is_empty(),
+            "query {query:?} on {expected_name:?} should produce match_positions"
+        );
+        let (s, e) = hit.match_positions[0];
+        assert_eq!(
+            hit.entry.name.get(s..e),
+            Some(expected_slice),
+            "query {query:?} highlight span ({s}, {e}) mismatch on {expected_name:?}"
+        );
+    }
+}
+
+#[test]
+fn test_pinyin_syllable_boundary_precision() {
+    let entries = vec![
+        make_entry("工作汇报.docx", "/Users/test/Docs/工作汇报.docx"),
+        make_entry("文件上传.zip", "/Users/test/Downloads/文件上传.zip"),
+        make_entry("西安.txt", "/Users/test/Docs/西安.txt"),
+        make_entry("高奥.txt", "/Users/test/Docs/高奥.txt"),
+    ];
+
+    let store = IndexStore::new();
+    store.replace(entries);
+    let filter = CompiledRecordFilter::default();
+
+    assert!(
+        search(&store, "ngzu", &filter, 10).is_empty(),
+        "ngzu must not cross-match inside gong+zuo"
+    );
+    assert!(
+        search(&store, "enjian", &filter, 10).is_empty(),
+        "enjian must not skip initial w of wen+jian"
+    );
+    assert!(
+        search(&store, "ian", &filter, 10).is_empty(),
+        "ian must not skip initial x of xi+an"
+    );
+
+    let ga_results = search(&store, "ga", &filter, 10);
+    assert_eq!(ga_results.len(), 1);
+    assert_eq!(ga_results[0].entry.name, "高奥.txt");
+    assert_eq!(
+        ga_results[0].match_positions,
+        vec![(0, 3)],
+        "ga on 高奥.txt should prefer single-syllable prefix 高 (0..3) over initials 高奥 (0..6)"
+    );
+}
+
+#[test]
+fn test_pinyin_v_u_equivalence_boundaries() {
+    let entries = vec![
+        make_entry("绿色.txt", "/Users/test/Docs/绿色.txt"),
+        make_entry("女儿.png", "/Users/test/Docs/女儿.png"),
+        make_entry("略过.txt", "/Users/test/Docs/略过.txt"),
+        make_entry("觉得.txt", "/Users/test/Docs/觉得.txt"),
+        make_entry("概率统计.pdf", "/Users/test/Docs/概率统计.pdf"),
+        make_entry("乱码.txt", "/Users/test/Docs/乱码.txt"),
+    ];
+
+    let store = IndexStore::new();
+    store.replace(entries);
+    let filter = CompiledRecordFilter::default();
+
+    let positive = [
+        ("lvse", "绿色.txt"),
+        ("nver", "女儿.png"),
+        ("lve", "略过.txt"),
+        ("jve", "觉得.txt"),
+        ("gailv", "概率统计.pdf"),
+    ];
+    for (query, expected_name) in positive {
+        let results = search(&store, query, &filter, 10);
+        assert!(
+            results.iter().any(|r| r.entry.name == expected_name),
+            "v/u query {query:?} should match {expected_name:?}"
+        );
+    }
+
+    let lv_results = search(&store, "lv", &filter, 10);
+    assert!(
+        lv_results.iter().all(|r| r.entry.name != "乱码.txt"),
+        "lv must not match luan in 乱码.txt"
+    );
+}
+
+#[test]
+fn test_pinyin_polyphones_simplified_and_traditional() {
+    let entries = vec![
+        make_entry("重量.xlsx", "/Users/test/Docs/重量.xlsx"),
+        make_entry("重新整理.md", "/Users/test/Docs/重新整理.md"),
+        make_entry("银行对账单.pdf", "/Users/test/Docs/银行对账单.pdf"),
+        make_entry("行事历.ics", "/Users/test/Docs/行事历.ics"),
+        make_entry("長度说明.txt", "/Users/test/Docs/長度说明.txt"),
+        make_entry("调试日志.log", "/Users/test/Docs/调试日志.log"),
+        make_entry("地图.png", "/Users/test/Docs/地图.png"),
+        make_entry("音樂.mp3", "/Users/test/Media/音樂.mp3"),
+        make_entry("乾坤.txt", "/Users/test/Docs/乾坤.txt"),
+    ];
+
+    let store = IndexStore::new();
+    store.replace(entries);
+    let filter = CompiledRecordFilter::default();
+
+    let cases = [
+        ("zhongliang", "重量.xlsx"),
+        ("chongxin", "重新整理.md"),
+        ("yinhang", "银行对账单.pdf"),
+        ("xingshi", "行事历.ics"),
+        ("changdu", "長度说明.txt"),
+        ("tiaoshi", "调试日志.log"),
+        ("ditu", "地图.png"),
+        ("yinyue", "音樂.mp3"),
+        ("qiankun", "乾坤.txt"),
+    ];
+
+    for (query, expected_name) in cases {
+        let results = search(&store, query, &filter, 10);
+        assert!(
+            results.iter().any(|r| r.entry.name == expected_name),
+            "polyphone query {query:?} should match {expected_name:?}"
+        );
+        let hit = results
+            .iter()
+            .find(|r| r.entry.name == expected_name)
+            .unwrap();
+        assert!(
+            !hit.match_positions.is_empty(),
+            "polyphone query {query:?} should yield match_positions"
+        );
+    }
+}
+
+#[test]
+fn test_cjk_and_pinyin_mixed_queries() {
+    let entries = vec![
+        make_entry("2026年财务预算表.xlsx", "/Users/test/Docs/2026年财务预算表.xlsx"),
+        make_entry("工作汇报.docx", "/Users/test/Docs/工作汇报.docx"),
+        make_entry("工作匯報.docx", "/Users/test/Docs/工作匯報.docx"),
+    ];
+
+    let store = IndexStore::new();
+    store.replace(entries);
+    let filter = CompiledRecordFilter::default();
+
+    // 1. 多词汉字+拼音："2026年 cwysb"
+    let r1 = search(&store, "2026年 cwysb", &filter, 10);
+    assert_eq!(r1.len(), 1);
+    assert_eq!(r1[0].entry.name, "2026年财务预算表.xlsx");
+    assert_eq!(r1[0].match_positions.len(), 2);
+    let s1_0 = &r1[0].entry.name[r1[0].match_positions[0].0..r1[0].match_positions[0].1];
+    let s1_1 = &r1[0].entry.name[r1[0].match_positions[1].0..r1[0].match_positions[1].1];
+    assert_eq!(s1_0, "2026年");
+    assert_eq!(s1_1, "财务预算表");
+
+    // 2. 多词汉字+拼音："财务 ysb"
+    let r2 = search(&store, "财务 ysb", &filter, 10);
+    assert_eq!(r2.len(), 1);
+    assert_eq!(r2[0].entry.name, "2026年财务预算表.xlsx");
+    assert_eq!(r2[0].match_positions.len(), 2);
+
+    // 3. 单词内汉字+拼音混合："工作hb" 同时命中简体与繁体，并高亮完整 "工作汇报"/"工作匯報"
+    let r3 = search(&store, "工作hb", &filter, 10);
+    assert_eq!(r3.len(), 2);
+    for hit in &r3 {
+        assert_eq!(hit.match_positions, vec![(0, "工作汇报".len())]);
+    }
+
+    // 4. 单词内汉字+全拼："工作huibao"
+    let r4 = search(&store, "工作huibao", &filter, 10);
+    assert_eq!(r4.len(), 2);
+
+    // 5. 纯汉字不匹配词依然返回空，杜绝误入拼音通道
+    let r5 = search(&store, "中文", &filter, 10);
+    assert!(r5.is_empty());
+}

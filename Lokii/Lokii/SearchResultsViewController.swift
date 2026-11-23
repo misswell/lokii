@@ -23,6 +23,623 @@ private final class InteractiveHintButton: NSButton {
     }
 }
 
+/// 空态顶部柔和圆形图标徽章：在深浅色下维持轻盈层级，不抢占标题视觉权重
+final class EmptyIconBadgeView: NSView {
+    let imageView = NSImageView()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        guard let layer else { return }
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer.cornerRadius = 24
+        layer.borderWidth = 1.0
+        layer.backgroundColor = NSColor.labelColor.withAlphaComponent(isDark ? 0.065 : 0.042).cgColor
+        layer.borderColor = NSColor.labelColor.withAlphaComponent(isDark ? 0.11 : 0.065).cgColor
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(false)
+
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentTintColor = .secondaryLabelColor
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.setAccessibilityElement(false)
+        addSubview(imageView)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 48),
+            heightAnchor.constraint(equalToConstant: 48),
+            imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            imageView.widthAnchor.constraint(equalToConstant: 24),
+            imageView.heightAnchor.constraint(equalToConstant: 24),
+        ])
+    }
+}
+
+/// 空搜索状态下的常用检索语法速查卡片：支持深浅色自适应高对比度、无位移悬停反馈与一键直填试搜
+final class SyntaxTipCardView: NSView {
+    let syntaxExample: String
+    let descriptionKey: String
+    var onSelect: ((String) -> Void)?
+
+    private let syntaxLabel = NSTextField(labelWithString: "")
+    private let descriptionLabel = NSTextField(labelWithString: "")
+    private var isHovered = false {
+        didSet { needsDisplay = true }
+    }
+    private var isPressed = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(syntaxExample: String, descriptionKey: String) {
+        self.syntaxExample = syntaxExample
+        self.descriptionKey = descriptionKey
+        super.init(frame: .zero)
+        setupView()
+        refreshLocalization()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        guard let layer else { return }
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer.cornerRadius = 9
+        layer.borderWidth = 1.0
+        if isDark {
+            if isPressed {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.50).cgColor
+            } else if isHovered {
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.085).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
+            } else {
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.048).cgColor
+                layer.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+            }
+        } else {
+            if isPressed {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.09).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.48).cgColor
+            } else if isHovered {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.04).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.40).cgColor
+            } else {
+                layer.backgroundColor = NSColor.controlBackgroundColor.cgColor
+                layer.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+            }
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let wasPressed = isPressed
+        isPressed = false
+        guard wasPressed else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        if bounds.contains(location) {
+            onSelect?(syntaxExample)
+        }
+    }
+
+    /// 供自动化测试触发与鼠标点击完全一致的回调路径
+    func simulateClick() {
+        onSelect?(syntaxExample)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect?(syntaxExample)
+        return true
+    }
+
+    func refreshLocalization() {
+        let desc = L(descriptionKey)
+        descriptionLabel.stringValue = desc
+        setAccessibilityLabel("\(syntaxExample), \(desc)")
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+
+        syntaxLabel.translatesAutoresizingMaskIntoConstraints = false
+        syntaxLabel.stringValue = syntaxExample
+        syntaxLabel.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+        syntaxLabel.textColor = .labelColor
+        syntaxLabel.lineBreakMode = .byTruncatingTail
+        syntaxLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        syntaxLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
+        descriptionLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
+        descriptionLabel.textColor = .secondaryLabelColor
+        descriptionLabel.alignment = .right
+        descriptionLabel.lineBreakMode = .byTruncatingTail
+        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        addSubview(syntaxLabel)
+        addSubview(descriptionLabel)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 38),
+            syntaxLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            syntaxLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            descriptionLabel.leadingAnchor.constraint(greaterThanOrEqualTo: syntaxLabel.trailingAnchor, constant: 10),
+            descriptionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            descriptionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+}
+
+/// 最近搜索历史单行胶囊：防止超长查询词换行撑破布局，悬停提示完整内容并支持一键回填检索
+final class RecentSearchChipView: NSView {
+    let query: String
+    var onSelect: ((String) -> Void)?
+
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private var isHovered = false {
+        didSet { needsDisplay = true }
+    }
+    private var isPressed = false {
+        didSet { needsDisplay = true }
+    }
+
+    init(query: String) {
+        self.query = query
+        super.init(frame: .zero)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        guard let layer else { return }
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer.cornerRadius = 8
+        layer.borderWidth = 1.0
+        if isDark {
+            layer.backgroundColor = NSColor.white.withAlphaComponent(isPressed ? 0.12 : (isHovered ? 0.085 : 0.048)).cgColor
+            layer.borderColor = (isHovered
+                ? NSColor.controlAccentColor.withAlphaComponent(0.45)
+                : NSColor.white.withAlphaComponent(0.10)).cgColor
+        } else {
+            layer.backgroundColor = (isPressed
+                ? NSColor.controlAccentColor.withAlphaComponent(0.08)
+                : (isHovered ? NSColor.controlAccentColor.withAlphaComponent(0.04) : NSColor.controlBackgroundColor)).cgColor
+            layer.borderColor = (isHovered
+                ? NSColor.controlAccentColor.withAlphaComponent(0.40)
+                : NSColor.separatorColor.withAlphaComponent(0.55)).cgColor
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let wasPressed = isPressed
+        isPressed = false
+        guard wasPressed else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        if bounds.contains(location) {
+            onSelect?(query)
+        }
+    }
+
+    func simulateClick() {
+        onSelect?(query)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onSelect?(query)
+        return true
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        // 由父容器 FlowWrapView 直接基于 frame 执行自动换行排布，保留 autoresizing 转换避免约束冲突
+        translatesAutoresizingMaskIntoConstraints = true
+        toolTip = query
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(query)
+
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?
+            .withSymbolConfiguration(iconConfig)
+        iconView.contentTintColor = .tertiaryLabelColor
+        iconView.setAccessibilityElement(false)
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.stringValue = query
+        titleLabel.font = .systemFont(ofSize: 12, weight: .regular)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.maximumNumberOfLines = 1
+
+        addSubview(iconView)
+        addSubview(titleLabel)
+
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 12),
+            iconView.heightAnchor.constraint(equalToConstant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 6),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 170),
+        ])
+    }
+
+    override var fittingSize: NSSize {
+        let labelWidth = min(ceil(titleLabel.intrinsicContentSize.width), 170)
+        return NSSize(width: 10 + 12 + 6 + labelWidth + 10, height: 28)
+    }
+}
+
+/// 纯 AppKit 自动换行流式布局容器，承载最近搜索胶囊在不同窗口宽度下的自然折行
+final class FlowWrapView: NSView {
+    var horizontalSpacing: CGFloat = 8
+    var verticalSpacing: CGFloat = 8
+    private var cachedHeight: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: cachedHeight)
+    }
+
+    override func layout() {
+        super.layout()
+        recalculateLayout()
+    }
+
+    func recalculateLayout() {
+        let availableWidth = bounds.width > 0 ? bounds.width : 560
+        var cursorX: CGFloat = 0
+        var cursorY: CGFloat = 0
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews where !subview.isHidden {
+            let size = subview.fittingSize
+            let clampedWidth = min(size.width, availableWidth)
+            if cursorX > 0 && cursorX + clampedWidth > availableWidth {
+                cursorX = 0
+                cursorY += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+            subview.frame = NSRect(x: cursorX, y: cursorY, width: clampedWidth, height: size.height)
+            cursorX += clampedWidth + horizontalSpacing
+            rowHeight = max(rowHeight, size.height)
+        }
+
+        let totalHeight = subviews.contains(where: { !$0.isHidden }) ? (cursorY + rowHeight) : 0
+        if abs(totalHeight - cachedHeight) > 0.5 {
+            cachedHeight = totalHeight
+            invalidateIntrinsicContentSize()
+        }
+    }
+}
+
+/// 无结果页的可点击行动建议卡片：图标底托 + 标题 + 说明，支持禁用态（例如模糊匹配已开启）
+final class EmptyActionCardView: NSView {
+    let normalSymbol: String
+    let disabledSymbol: String?
+    let titleKey: String
+    let subtitleKey: String
+    let disabledSubtitleKey: String?
+    var onAction: (() -> Void)?
+
+    private let iconWell = NSView()
+    private let iconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let subtitleLabel = NSTextField(labelWithString: "")
+
+    private var isHovered = false {
+        didSet { needsDisplay = true }
+    }
+    private var isPressed = false {
+        didSet { needsDisplay = true }
+    }
+
+    var isCardEnabled: Bool = true {
+        didSet {
+            if !isCardEnabled {
+                isHovered = false
+                isPressed = false
+            }
+            refreshContent()
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    init(
+        symbol: String,
+        disabledSymbol: String? = nil,
+        titleKey: String,
+        subtitleKey: String,
+        disabledSubtitleKey: String? = nil
+    ) {
+        self.normalSymbol = symbol
+        self.disabledSymbol = disabledSymbol
+        self.titleKey = titleKey
+        self.subtitleKey = subtitleKey
+        self.disabledSubtitleKey = disabledSubtitleKey
+        super.init(frame: .zero)
+        setupView()
+        refreshContent()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        guard let layer else { return }
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        layer.cornerRadius = 10
+        layer.borderWidth = 1.0
+        alphaValue = isCardEnabled ? 1.0 : 0.58
+
+        if !isCardEnabled {
+            layer.backgroundColor = (isDark
+                ? NSColor.white.withAlphaComponent(0.03)
+                : NSColor.labelColor.withAlphaComponent(0.025)).cgColor
+            layer.borderColor = (isDark
+                ? NSColor.white.withAlphaComponent(0.07)
+                : NSColor.separatorColor.withAlphaComponent(0.35)).cgColor
+            iconView.contentTintColor = .tertiaryLabelColor
+        } else if isDark {
+            if isPressed {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.50).cgColor
+            } else if isHovered {
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.085).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
+            } else {
+                layer.backgroundColor = NSColor.white.withAlphaComponent(0.048).cgColor
+                layer.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+            }
+            iconView.contentTintColor = isHovered ? .controlAccentColor : .secondaryLabelColor
+        } else {
+            if isPressed {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.09).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.48).cgColor
+            } else if isHovered {
+                layer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.04).cgColor
+                layer.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.40).cgColor
+            } else {
+                layer.backgroundColor = NSColor.controlBackgroundColor.cgColor
+                layer.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+            }
+            iconView.contentTintColor = isHovered ? .controlAccentColor : .secondaryLabelColor
+        }
+
+        iconWell.layer?.cornerRadius = 7
+        iconWell.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(
+            isDark ? (isHovered && isCardEnabled ? 0.09 : 0.06) : (isHovered && isCardEnabled ? 0.06 : 0.042)
+        ).cgColor
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if isCardEnabled {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isCardEnabled else { return }
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isCardEnabled else { return }
+        isPressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let wasPressed = isPressed
+        isPressed = false
+        guard isCardEnabled, wasPressed else { return }
+        let location = convert(event.locationInWindow, from: nil)
+        if bounds.contains(location) {
+            onAction?()
+        }
+    }
+
+    func simulateClick() {
+        guard isCardEnabled else { return }
+        onAction?()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isCardEnabled else { return false }
+        onAction?()
+        return true
+    }
+
+    func refreshContent() {
+        let title = L(titleKey)
+        let activeSubtitleKey = (!isCardEnabled && disabledSubtitleKey != nil) ? disabledSubtitleKey! : subtitleKey
+        let subtitle = L(activeSubtitleKey)
+        titleLabel.stringValue = title
+        subtitleLabel.stringValue = subtitle
+
+        let symbolName = (!isCardEnabled && disabledSymbol != nil) ? disabledSymbol! : normalSymbol
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        iconView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+
+        setAccessibilityEnabled(isCardEnabled)
+        setAccessibilityLabel("\(title), \(subtitle)")
+        needsDisplay = true
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+
+        iconWell.wantsLayer = true
+        iconWell.translatesAutoresizingMaskIntoConstraints = false
+        iconWell.setAccessibilityElement(false)
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.setAccessibilityElement(false)
+        iconWell.addSubview(iconView)
+
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+        titleLabel.textColor = .labelColor
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 1
+
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.maximumNumberOfLines = 1
+
+        let textStack = NSStackView(views: [titleLabel, subtitleLabel])
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+
+        addSubview(iconWell)
+        addSubview(textStack)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 58),
+            iconWell.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            iconWell.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconWell.widthAnchor.constraint(equalToConstant: 32),
+            iconWell.heightAnchor.constraint(equalToConstant: 32),
+            iconView.centerXAnchor.constraint(equalTo: iconWell.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconWell.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+            textStack.leadingAnchor.constraint(equalTo: iconWell.trailingAnchor, constant: 10),
+            textStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+}
+
 /// 底部状态栏微反馈轻量气泡视图：展示后台扫描提示文案与独立旋转微动效
 final class StatusFeedbackCapsuleView: NSView {
     let label = NSTextField(labelWithString: "")
@@ -274,6 +891,8 @@ extension SearchResultsViewControllerDelegate {
 
 /// 系统服务粘贴板类型清单：注册、请求应答与剪贴板写入共用同一份定义
 enum ServicesPasteboard {
+    static let filenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+
     static let directoryTypes: Set<NSPasteboard.PasteboardType> = [
         NSPasteboard.PasteboardType("public.directory"),
         NSPasteboard.PasteboardType("public.folder"),
@@ -281,7 +900,7 @@ enum ServicesPasteboard {
 
     static let generalTypes: Set<NSPasteboard.PasteboardType> = [
         .fileURL,
-        NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+        filenamesType,
         .string,
         NSPasteboard.PasteboardType("public.plain-text"),
         NSPasteboard.PasteboardType("public.item"),
@@ -292,7 +911,7 @@ enum ServicesPasteboard {
     static let allTypes = directoryTypes.union(generalTypes)
 
     /// 以文件对象形式写入剪贴板的类型子集
-    static let fileObjectTypes = directoryTypes.union([.fileURL])
+    static let fileObjectTypes = directoryTypes.union([.fileURL, filenamesType])
 }
 
 private var servicesMenuKey: UInt8 = 0
@@ -363,10 +982,33 @@ final class BreadcrumbMenuDelegate: NSObject, NSMenuDelegate {
     }
 }
 
+/// “打开方式”二级子菜单代理：仅在用户真正展开子菜单时按需查询 LaunchServices，避免主右键菜单弹出卡顿
+private final class OpenWithMenuDelegate: NSObject, NSMenuDelegate {
+    var onNeedsUpdate: ((NSMenu) -> Void)?
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        onNeedsUpdate?(menu)
+    }
+}
+
 /// 原生面包屑路径导航控件：支持组件单元格坐标精确几何命中与空白区域防穿透
 final class BreadcrumbPathControl: NSPathControl {
     weak var actionDelegate: BreadcrumbPathControlDelegate?
     let menuDelegate = BreadcrumbMenuDelegate()
+    private(set) var isOfflinePathMode = false
+    private(set) var offlineComponentURLs: [URL] = []
+
+    func setOfflineItems(_ items: [NSPathControlItem], urls: [URL]) {
+        isOfflinePathMode = true
+        offlineComponentURLs = urls
+        url = nil
+        pathItems = items
+    }
+
+    func clearOfflineState() {
+        isOfflinePathMode = false
+        offlineComponentURLs = []
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         return true
@@ -376,9 +1018,12 @@ final class BreadcrumbPathControl: NSPathControl {
         let location = convert(event.locationInWindow, from: nil)
         guard let pathCell = cell as? NSPathCell else { return nil }
 
-        for componentCell in pathCell.pathComponentCells {
+        for (index, componentCell) in pathCell.pathComponentCells.enumerated() {
             let rect = pathCell.rect(of: componentCell, withFrame: bounds, in: self)
-            if rect.contains(location), let url = componentCell.url {
+            let resolvedURL: URL? = isOfflinePathMode
+                ? (index < offlineComponentURLs.count ? offlineComponentURLs[index] : nil)
+                : componentCell.url
+            if rect.contains(location), let url = resolvedURL {
                 componentCell.isHighlighted = true
                 menuDelegate.activeComponentCell = componentCell
                 guard let menu = actionDelegate?.breadcrumbPathControl(self, menuFor: url) else {
@@ -443,10 +1088,40 @@ final class SearchResultsViewController: NSViewController {
     private(set) var results: [FfiSearchResult] = []
     private let iconCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 512
+        cache.countLimit = 256
         return cache
     }()
+    /// 基于文件类型/扩展名的纯内存图标缓存（仅在主线程读写），规避普通文件逐路径查盘与缓存颠簸
+    private var typeIconCache: [String: NSImage] = [:]
+    /// 应用包自定义图标异步加载队列，确保主线程滚动零磁盘 I/O
+    private let iconLoadQueue = DispatchQueue(label: "com.lokii.results.iconLoad", qos: .userInitiated)
+    private var openWithAppNameCache: [String: String] = [:]
+    private var openWithAppIconCache: [String: NSImage] = [:]
+    private let openWithMenuDelegate = OpenWithMenuDelegate()
+    /// 表头右键列显隐菜单代理（展开时动态刷新勾选态与当前语言标题）
+    private let columnHeaderMenuDelegate = OpenWithMenuDelegate()
+    /// 强持有主表头视图，便于空态隐藏表头后无损恢复列头与右键列显隐菜单
+    private(set) var savedHeaderView: NSTableHeaderView?
+
+    static let hiddenColumnsDefaultsKey = "LokiiHiddenResultColumns"
+    static let defaultHiddenColumnIdentifiers: Set<NSUserInterfaceItemIdentifier> = [
+        .columnCreated,
+        .columnExtension,
+    ]
+    private static let canonicalColumnDefinitions: [(id: NSUserInterfaceItemIdentifier, titleKey: String, width: CGFloat, sortKey: String)] = [
+        (.columnName, "search.col.name", 280, "name"),
+        (.columnPath, "search.col.path", 240, "path"),
+        (.columnModified, "search.col.dateModified", 160, "modified"),
+        (.columnCreated, "search.col.dateCreated", 160, "created"),
+        (.columnExtension, "search.col.extension", 80, "extension"),
+        (.columnSize, "search.col.size", 80, "size"),
+    ]
+
     private var lastReportedPath: String?
+    private var lastReportedOffline: Bool?
+    private var lastRenderedBottomPath: String?
+    private var lastRenderedBottomOffline: Bool = false
+    private var hasRenderedBottomPath: Bool = false
     private(set) var currentFontSize: CGFloat = CGFloat(TableDensity.defaultFontSize)
     private(set) var fontCache = TableFontCache(fontSize: CGFloat(TableDensity.defaultFontSize))
     private(set) var currentIconSize: CGFloat = TableDensity.calculateIconSize(for: CGFloat(TableDensity.defaultFontSize))
@@ -474,14 +1149,236 @@ final class SearchResultsViewController: NSViewController {
     /// 注入式确认弹窗闭包，默认通过主视窗弹出原生确认 Sheet，返回用户是否确认执行
     var confirmTrashHandler: ((Int, @escaping (Bool) -> Void) -> Void)?
 
+    /// In-memory offline path predicate supplied by SearchEngine; avoids disk checks on UI events.
+    var isPathOfflineHandler: ((String) -> Bool)?
+
+    /// Injectable workspace icon lookup used for online entries; bypassed completely for offline entries.
+    var workspaceIconProvider: (String) -> NSImage = { path in
+        NSWorkspace.shared.icon(forFile: path)
+    }
+
     /// 上下文作用域租约：当面包屑弹出右键菜单时临时接管有效载荷，规避与主列表选区发生交叉错位
     var activeContextMenuPayload: [URL]?
 
     // MARK: - Empty State View
-    var hasActiveSearchQuery: Bool = false
-    let emptyStateContainer = NSView()
-    let emptyIconImageView = NSImageView()
+    enum EmptyState: Equatable {
+        case noMatches
+        case excluded(rule: String)
+        case indexing
+        case idleEmpty
+    }
+
+    /// 统一判定是否应进入空搜索隐藏态：仅当开关开启、输入为空（含纯空格）、过滤气泡无约束、目录树未选中且索引空闲时成立
+    static func shouldShowIdleEmptyState(
+        hideWhenEmpty: Bool,
+        query: String,
+        isFilterUnconstrained: Bool,
+        hasActiveDirectory: Bool,
+        isIndexingIdle: Bool
+    ) -> Bool {
+        hideWhenEmpty
+            && query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && isFilterUnconstrained
+            && !hasActiveDirectory
+            && isIndexingIdle
+    }
+
+    var emptyState: EmptyState = .noMatches {
+        didSet {
+            if oldValue != emptyState { renderEmptyState() }
+        }
+    }
+    var onManageIndexRules: (() -> Void)?
+    var onSelectSyntaxExample: ((String) -> Void)?
+    var onSelectRecentSearch: ((String) -> Void)?
+    var onClearRecentSearches: (() -> Void)?
+    var onFocusSearchField: (() -> Void)?
+    var onEnableFuzzyMode: (() -> Void)?
+    var onOpenFilterPopover: (() -> Void)?
+
+    let emptyStateContainer = NSStackView()
+    private let emptyIconBadge = EmptyIconBadgeView()
+    var emptyIconImageView: NSImageView { emptyIconBadge.imageView }
     let emptyTitleLabel = NSTextField(labelWithString: "")
+    let emptySubtitleLabel = NSTextField(wrappingLabelWithString: "")
+    let emptyRuleRow = NSStackView()
+    private let emptyRuleTagLabel = NSTextField(labelWithString: "")
+    let emptyRuleNameLabel = NSTextField(labelWithString: "")
+    private let emptyManageRulesButton = NSButton()
+
+    let emptySyntaxSection = NSStackView()
+    private let emptySyntaxSectionTitle = NSTextField(labelWithString: "")
+    let emptySyntaxGrid = NSStackView()
+    private(set) var syntaxTipButtons: [SyntaxTipCardView] = []
+
+    let emptyRecentSection = NSStackView()
+    private let emptyRecentDivider = NSBox()
+    private let emptyRecentHeaderRow = NSStackView()
+    private let emptyRecentTitleLabel = NSTextField(labelWithString: "")
+    private let emptyClearRecentButton = InteractiveHintButton()
+    private let emptyRecentChipsContainer = FlowWrapView()
+    private(set) var recentSearchChips: [RecentSearchChipView] = []
+    private var recentSearchQueries: [String] = []
+    private static let maxEmptyStateRecentChips = 5
+
+    let emptyNoMatchActionsGrid = NSStackView()
+    private(set) var noMatchActionCards: [EmptyActionCardView] = []
+    private var emptyContextQuery: String = ""
+    private var isFuzzyModeActive: Bool = false
+
+    private static let idleSyntaxExamples: [(example: String, descKey: String)] = [
+        ("*.pdf", "search.empty.idle.tip.wildcard"),
+        ("ext:pdf,docx", "search.empty.idle.tip.ext"),
+        ("foo | bar", "search.empty.idle.tip.or"),
+        ("size:>10m", "search.empty.idle.tip.size"),
+        ("!node_modules", "search.empty.idle.tip.exclude"),
+        ("in:Desktop", "search.empty.idle.tip.scope"),
+    ]
+
+    private static let idleSearchSymbolImage = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+    private static let noMatchSymbolImage = NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+    private static let excludedSymbolImage = NSImage(systemSymbolName: "folder.badge.minus", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+    private static let indexingSymbolImage = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+
+    /// 首次结果集是否已写入；建库完成到默认列表返回之间结果仍为空，此时不能把空态当成「未找到匹配项」闪出来
+    private var hasAppliedResults = false
+
+    /// 同步空态引导页的最近搜索胶囊（最多展示 5 条），并在当前处于 `.idleEmpty` 时即时刷新显隐
+    func updateRecentSearches(_ queries: [String]) {
+        let clamped = Array(queries.prefix(Self.maxEmptyStateRecentChips))
+        guard clamped != recentSearchQueries else { return }
+        recentSearchQueries = clamped
+        rebuildRecentSearchChips()
+        renderEmptyState()
+    }
+
+    /// 同步无结果态的当前搜索词与模糊匹配激活状态，动态刷新副标题回显与“尝试模糊匹配”卡片可用态
+    func updateEmptyContext(query: String, isFuzzyActive: Bool) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != emptyContextQuery || isFuzzyActive != isFuzzyModeActive else { return }
+        emptyContextQuery = trimmed
+        isFuzzyModeActive = isFuzzyActive
+        if noMatchActionCards.count > 1 {
+            noMatchActionCards[1].isCardEnabled = !isFuzzyActive
+        }
+        renderEmptyState()
+    }
+
+    /// 供自动化测试触发“清空历史”动作，与用户点击按钮走同一路径
+    func triggerClearRecentSearchesForTesting() {
+        clearRecentSearchesClicked()
+    }
+
+    private func rebuildRecentSearchChips() {
+        for subview in emptyRecentChipsContainer.subviews {
+            subview.removeFromSuperview()
+        }
+        recentSearchChips.removeAll()
+        for query in recentSearchQueries {
+            let chip = RecentSearchChipView(query: query)
+            chip.onSelect = { [weak self] selected in
+                self?.onSelectRecentSearch?(selected)
+            }
+            recentSearchChips.append(chip)
+            emptyRecentChipsContainer.addSubview(chip)
+        }
+        emptyRecentChipsContainer.recalculateLayout()
+        emptyRecentChipsContainer.needsLayout = true
+    }
+
+    private static func truncatedEmptyQueryDisplay(_ query: String) -> String {
+        let maxLen = 36
+        guard query.count > maxLen else { return query }
+        let head = query.prefix(17)
+        let tail = query.suffix(18)
+        return "\(head)…\(tail)"
+    }
+
+    private func renderEmptyState() {
+        let shouldCollapseHeader = results.isEmpty && emptyState == .idleEmpty
+        if shouldCollapseHeader {
+            if tableView.headerView != nil {
+                tableView.headerView = nil
+            }
+        } else if let savedHeader = savedHeaderView, tableView.headerView !== savedHeader {
+            tableView.headerView = savedHeader
+        }
+
+        emptyStateContainer.isHidden = !results.isEmpty || (emptyState == .noMatches && !hasAppliedResults)
+        guard results.isEmpty else { return }
+
+        let isExcluded: Bool
+        let isIdleEmpty: Bool
+        let isNoMatches: Bool
+        switch emptyState {
+        case .noMatches:
+            emptyTitleLabel.stringValue = L("search.empty.title")
+            emptyTitleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+            if emptyContextQuery.isEmpty {
+                emptySubtitleLabel.stringValue = L("search.empty.subtitle")
+            } else {
+                emptySubtitleLabel.stringValue = String(
+                    format: L("search.empty.subtitleWithQuery"),
+                    Self.truncatedEmptyQueryDisplay(emptyContextQuery)
+                )
+            }
+            emptyIconImageView.image = Self.noMatchSymbolImage
+            for (index, card) in noMatchActionCards.enumerated() {
+                if index == 1 {
+                    card.isCardEnabled = !isFuzzyModeActive
+                }
+                card.refreshContent()
+            }
+            isExcluded = false
+            isIdleEmpty = false
+            isNoMatches = true
+        case .excluded(let rule):
+            emptyTitleLabel.stringValue = L("search.empty.excluded.title")
+            emptyTitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+            emptySubtitleLabel.stringValue = L("search.empty.excluded.subtitle")
+            emptyRuleNameLabel.stringValue = rule
+            emptyIconImageView.image = Self.excludedSymbolImage
+            isExcluded = true
+            isIdleEmpty = false
+            isNoMatches = false
+        case .indexing:
+            emptyTitleLabel.stringValue = L("search.empty.indexing.title")
+            emptyTitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+            emptySubtitleLabel.stringValue = L("search.empty.indexing.subtitle")
+            emptyIconImageView.image = Self.indexingSymbolImage
+            isExcluded = false
+            isIdleEmpty = false
+            isNoMatches = false
+        case .idleEmpty:
+            emptyTitleLabel.stringValue = L("search.empty.idle.title")
+            emptyTitleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+            emptySubtitleLabel.stringValue = L("search.empty.idle.subtitle")
+            emptyIconImageView.image = Self.idleSearchSymbolImage
+            emptySyntaxSectionTitle.stringValue = L("search.empty.idle.section.syntax")
+            emptyRecentTitleLabel.stringValue = L("search.empty.idle.section.recent")
+            updateClearRecentButtonTitle()
+            for card in syntaxTipButtons {
+                card.refreshLocalization()
+            }
+            isExcluded = false
+            isIdleEmpty = true
+            isNoMatches = false
+        }
+
+        emptyRuleTagLabel.stringValue = "\(L("search.empty.excluded.tag")): "
+        emptyManageRulesButton.title = L("search.empty.manageRules")
+        emptyManageRulesButton.setAccessibilityLabel(L("search.empty.manageRules"))
+        emptySubtitleLabel.isHidden = false
+        emptyRuleRow.isHidden = !isExcluded
+        emptyManageRulesButton.isHidden = !isExcluded
+        emptySyntaxSection.isHidden = !isIdleEmpty
+        emptyRecentSection.isHidden = !(isIdleEmpty && !recentSearchQueries.isEmpty)
+        emptyNoMatchActionsGrid.isHidden = !isNoMatches
+    }
 
     /// 主检索列表右键上下文菜单代理：成对维护 NSApp.servicesMenu 状态机
     private let tableMenuDelegate = BreadcrumbMenuDelegate()
@@ -543,27 +1440,7 @@ final class SearchResultsViewController: NSViewController {
 
         setupBottomBar()
 
-        emptyStateContainer.translatesAutoresizingMaskIntoConstraints = false
-        emptyStateContainer.isHidden = true
-        containerView.addSubview(emptyStateContainer)
-
-        emptyIconImageView.translatesAutoresizingMaskIntoConstraints = false
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: 36, weight: .light)
-        emptyIconImageView.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)?
-            .withSymbolConfiguration(iconConfig)
-        emptyIconImageView.contentTintColor = .tertiaryLabelColor
-        emptyStateContainer.addSubview(emptyIconImageView)
-
-        emptyTitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        emptyTitleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        emptyTitleLabel.textColor = .secondaryLabelColor
-        emptyTitleLabel.alignment = .center
-        emptyTitleLabel.isEditable = false
-        emptyTitleLabel.isSelectable = false
-        emptyTitleLabel.drawsBackground = false
-        emptyTitleLabel.isBezeled = false
-        emptyTitleLabel.stringValue = L("search.empty.title")
-        emptyStateContainer.addSubview(emptyTitleLabel)
+        setupEmptyState(in: containerView)
 
         NSLayoutConstraint.activate([
             // 顶端锚定至安全区布局辅助线，使表头与滚动视口始终对齐至窗口工具栏底缘，
@@ -583,21 +1460,249 @@ final class SearchResultsViewController: NSViewController {
             bottomBar.heightAnchor.constraint(equalToConstant: 28),
 
             emptyStateContainer.centerXAnchor.constraint(equalTo: tableScrollView.centerXAnchor),
-            emptyStateContainer.centerYAnchor.constraint(equalTo: tableScrollView.centerYAnchor, constant: -16),
-            emptyStateContainer.widthAnchor.constraint(lessThanOrEqualTo: tableScrollView.widthAnchor, constant: -48),
-
-            emptyIconImageView.topAnchor.constraint(equalTo: emptyStateContainer.topAnchor),
-            emptyIconImageView.centerXAnchor.constraint(equalTo: emptyStateContainer.centerXAnchor),
-            emptyIconImageView.widthAnchor.constraint(equalToConstant: 40),
-            emptyIconImageView.heightAnchor.constraint(equalToConstant: 40),
-
-            emptyTitleLabel.topAnchor.constraint(equalTo: emptyIconImageView.bottomAnchor, constant: 12),
-            emptyTitleLabel.leadingAnchor.constraint(equalTo: emptyStateContainer.leadingAnchor),
-            emptyTitleLabel.trailingAnchor.constraint(equalTo: emptyStateContainer.trailingAnchor),
-            emptyTitleLabel.bottomAnchor.constraint(equalTo: emptyStateContainer.bottomAnchor),
+            emptyStateContainer.centerYAnchor.constraint(equalTo: tableScrollView.centerYAnchor, constant: -12),
+            emptyStateContainer.widthAnchor.constraint(lessThanOrEqualTo: tableScrollView.widthAnchor, constant: -56),
         ])
 
         self.view = containerView
+    }
+
+    private func setupEmptyState(in containerView: NSView) {
+        emptyStateContainer.translatesAutoresizingMaskIntoConstraints = false
+        emptyStateContainer.orientation = .vertical
+        emptyStateContainer.alignment = .centerX
+        emptyStateContainer.spacing = 8
+        containerView.addSubview(emptyStateContainer)
+
+        emptyTitleLabel.font = .systemFont(ofSize: 18, weight: .semibold)
+        emptyTitleLabel.textColor = .labelColor
+        emptyTitleLabel.alignment = .center
+        emptySubtitleLabel.font = .systemFont(ofSize: 12.5)
+        emptySubtitleLabel.textColor = .secondaryLabelColor
+        emptySubtitleLabel.alignment = .center
+        emptySubtitleLabel.maximumNumberOfLines = 2
+
+        emptyRuleRow.orientation = .horizontal
+        emptyRuleRow.alignment = .centerY
+        emptyRuleRow.spacing = 4
+
+        emptyRuleTagLabel.font = .systemFont(ofSize: 12)
+        emptyRuleTagLabel.textColor = .secondaryLabelColor
+        emptyRuleTagLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        emptyRuleNameLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        emptyRuleNameLabel.textColor = .labelColor
+        emptyRuleNameLabel.lineBreakMode = .byTruncatingMiddle
+        emptyRuleNameLabel.maximumNumberOfLines = 1
+
+        emptyRuleRow.addArrangedSubview(emptyRuleTagLabel)
+        emptyRuleRow.addArrangedSubview(emptyRuleNameLabel)
+
+        emptyManageRulesButton.bezelStyle = .rounded
+        emptyManageRulesButton.controlSize = .regular
+        emptyManageRulesButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular))
+        emptyManageRulesButton.imagePosition = .imageLeading
+        emptyManageRulesButton.contentTintColor = .secondaryLabelColor
+        emptyManageRulesButton.target = self
+        emptyManageRulesButton.action = #selector(manageIndexRulesClicked)
+
+        // 1. 「试试这样搜索」语法分区
+        emptySyntaxSection.translatesAutoresizingMaskIntoConstraints = false
+        emptySyntaxSection.orientation = .vertical
+        emptySyntaxSection.alignment = .leading
+        emptySyntaxSection.spacing = 8
+
+        emptySyntaxSectionTitle.translatesAutoresizingMaskIntoConstraints = false
+        emptySyntaxSectionTitle.font = .systemFont(ofSize: 11.5, weight: .medium)
+        emptySyntaxSectionTitle.textColor = .secondaryLabelColor
+
+        emptySyntaxGrid.translatesAutoresizingMaskIntoConstraints = false
+        emptySyntaxGrid.orientation = .vertical
+        emptySyntaxGrid.alignment = .centerX
+        emptySyntaxGrid.spacing = 8
+        syntaxTipButtons.removeAll()
+        for rowIndex in stride(from: 0, to: Self.idleSyntaxExamples.count, by: 2) {
+            let rowStack = NSStackView()
+            rowStack.translatesAutoresizingMaskIntoConstraints = false
+            rowStack.orientation = .horizontal
+            rowStack.distribution = .fillEqually
+            rowStack.spacing = 12
+            for offset in 0..<2 where rowIndex + offset < Self.idleSyntaxExamples.count {
+                let item = Self.idleSyntaxExamples[rowIndex + offset]
+                let card = SyntaxTipCardView(syntaxExample: item.example, descriptionKey: item.descKey)
+                card.onSelect = { [weak self] example in
+                    self?.onSelectSyntaxExample?(example)
+                }
+                syntaxTipButtons.append(card)
+                rowStack.addArrangedSubview(card)
+            }
+            emptySyntaxGrid.addArrangedSubview(rowStack)
+            rowStack.widthAnchor.constraint(equalTo: emptySyntaxGrid.widthAnchor).isActive = true
+        }
+        emptySyntaxSection.addArrangedSubview(emptySyntaxSectionTitle)
+        emptySyntaxSection.addArrangedSubview(emptySyntaxGrid)
+
+        // 2. 「最近搜索」分区（仅存在历史记录时显示）
+        emptyRecentSection.translatesAutoresizingMaskIntoConstraints = false
+        emptyRecentSection.orientation = .vertical
+        emptyRecentSection.alignment = .leading
+        emptyRecentSection.spacing = 8
+
+        emptyRecentDivider.translatesAutoresizingMaskIntoConstraints = false
+        emptyRecentDivider.boxType = .separator
+
+        emptyRecentHeaderRow.translatesAutoresizingMaskIntoConstraints = false
+        emptyRecentHeaderRow.orientation = .horizontal
+        emptyRecentHeaderRow.alignment = .centerY
+        emptyRecentHeaderRow.spacing = 8
+
+        emptyRecentTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyRecentTitleLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+        emptyRecentTitleLabel.textColor = .secondaryLabelColor
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        emptyClearRecentButton.translatesAutoresizingMaskIntoConstraints = false
+        emptyClearRecentButton.isBordered = false
+        emptyClearRecentButton.focusRingType = .none
+        emptyClearRecentButton.contentTintColor = .secondaryLabelColor
+        let trashConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        emptyClearRecentButton.image = NSImage(systemSymbolName: "trash", accessibilityDescription: nil)?
+            .withSymbolConfiguration(trashConfig)
+        emptyClearRecentButton.imagePosition = .imageTrailing
+        emptyClearRecentButton.imageHugsTitle = true
+        emptyClearRecentButton.target = self
+        emptyClearRecentButton.action = #selector(clearRecentSearchesClicked)
+        updateClearRecentButtonTitle()
+
+        emptyRecentHeaderRow.addArrangedSubview(emptyRecentTitleLabel)
+        emptyRecentHeaderRow.addArrangedSubview(spacer)
+        emptyRecentHeaderRow.addArrangedSubview(emptyClearRecentButton)
+
+        emptyRecentChipsContainer.translatesAutoresizingMaskIntoConstraints = false
+        emptyRecentSection.addArrangedSubview(emptyRecentDivider)
+        emptyRecentSection.addArrangedSubview(emptyRecentHeaderRow)
+        emptyRecentSection.addArrangedSubview(emptyRecentChipsContainer)
+        emptyRecentSection.setCustomSpacing(12, after: emptyRecentDivider)
+
+        // 3. 无匹配结果 2x2 可点击行动建议卡片
+        emptyNoMatchActionsGrid.translatesAutoresizingMaskIntoConstraints = false
+        emptyNoMatchActionsGrid.orientation = .vertical
+        emptyNoMatchActionsGrid.alignment = .centerX
+        emptyNoMatchActionsGrid.spacing = 10
+
+        let editQueryCard = EmptyActionCardView(
+            symbol: "textformat.abc",
+            titleKey: "search.empty.action.checkKeyword.title",
+            subtitleKey: "search.empty.action.checkKeyword.subtitle"
+        )
+        editQueryCard.onAction = { [weak self] in
+            self?.onFocusSearchField?()
+        }
+
+        let fuzzyCard = EmptyActionCardView(
+            symbol: "sparkle.magnifyingglass",
+            disabledSymbol: "checkmark.circle",
+            titleKey: "search.empty.action.tryFuzzy.title",
+            subtitleKey: "search.empty.action.tryFuzzy.subtitle",
+            disabledSubtitleKey: "search.empty.action.tryFuzzy.activeSubtitle"
+        )
+        fuzzyCard.onAction = { [weak self] in
+            self?.onEnableFuzzyMode?()
+        }
+
+        let filterCard = EmptyActionCardView(
+            symbol: "slider.horizontal.3",
+            titleKey: "search.empty.action.checkFilters.title",
+            subtitleKey: "search.empty.action.checkFilters.subtitle"
+        )
+        filterCard.onAction = { [weak self] in
+            self?.onOpenFilterPopover?()
+        }
+
+        let scopeCard = EmptyActionCardView(
+            symbol: "folder.badge.questionmark",
+            titleKey: "search.empty.action.checkScope.title",
+            subtitleKey: "search.empty.action.checkScope.subtitle"
+        )
+        scopeCard.onAction = { [weak self] in
+            self?.onManageIndexRules?()
+        }
+
+        noMatchActionCards = [editQueryCard, fuzzyCard, filterCard, scopeCard]
+        for rowIndex in stride(from: 0, to: noMatchActionCards.count, by: 2) {
+            let rowStack = NSStackView()
+            rowStack.translatesAutoresizingMaskIntoConstraints = false
+            rowStack.orientation = .horizontal
+            rowStack.distribution = .fillEqually
+            rowStack.spacing = 12
+            rowStack.addArrangedSubview(noMatchActionCards[rowIndex])
+            rowStack.addArrangedSubview(noMatchActionCards[rowIndex + 1])
+            emptyNoMatchActionsGrid.addArrangedSubview(rowStack)
+            rowStack.widthAnchor.constraint(equalTo: emptyNoMatchActionsGrid.widthAnchor).isActive = true
+        }
+
+        for element in [
+            emptyIconBadge,
+            emptyTitleLabel,
+            emptySubtitleLabel,
+            emptyRuleRow,
+            emptyManageRulesButton,
+            emptySyntaxSection,
+            emptyRecentSection,
+            emptyNoMatchActionsGrid,
+        ] {
+            element.translatesAutoresizingMaskIntoConstraints = false
+            emptyStateContainer.addArrangedSubview(element)
+        }
+        emptyStateContainer.setCustomSpacing(10, after: emptyIconBadge)
+        emptyStateContainer.setCustomSpacing(5, after: emptyTitleLabel)
+        emptyStateContainer.setCustomSpacing(18, after: emptySubtitleLabel)
+        emptyStateContainer.setCustomSpacing(16, after: emptyRuleRow)
+        emptyStateContainer.setCustomSpacing(16, after: emptySyntaxSection)
+
+        let preferredWidth = emptyStateContainer.widthAnchor.constraint(equalToConstant: 560)
+        preferredWidth.priority = .defaultHigh
+        let actionsWidth = emptyNoMatchActionsGrid.widthAnchor.constraint(equalToConstant: 560)
+        actionsWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            preferredWidth,
+            emptyTitleLabel.widthAnchor.constraint(equalTo: emptyStateContainer.widthAnchor),
+            emptySubtitleLabel.widthAnchor.constraint(equalTo: emptyStateContainer.widthAnchor),
+            emptyRuleNameLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
+            emptySyntaxSection.widthAnchor.constraint(equalTo: emptyStateContainer.widthAnchor),
+            emptySyntaxGrid.widthAnchor.constraint(equalTo: emptySyntaxSection.widthAnchor),
+            emptyRecentSection.widthAnchor.constraint(equalTo: emptyStateContainer.widthAnchor),
+            emptyRecentDivider.widthAnchor.constraint(equalTo: emptyRecentSection.widthAnchor),
+            emptyRecentHeaderRow.widthAnchor.constraint(equalTo: emptyRecentSection.widthAnchor),
+            emptyRecentChipsContainer.widthAnchor.constraint(equalTo: emptyRecentSection.widthAnchor),
+            actionsWidth,
+            emptyNoMatchActionsGrid.widthAnchor.constraint(lessThanOrEqualTo: emptyStateContainer.widthAnchor),
+        ])
+        renderEmptyState()
+    }
+
+    private func updateClearRecentButtonTitle() {
+        let title = L("search.empty.idle.clearHistory")
+        emptyClearRecentButton.attributedTitle = NSAttributedString(
+            string: title + " ",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        emptyClearRecentButton.setAccessibilityLabel(title)
+    }
+
+    @objc private func manageIndexRulesClicked() {
+        onManageIndexRules?()
+    }
+
+    @objc private func clearRecentSearchesClicked() {
+        onClearRecentSearches?()
     }
 
     private func setupBottomBar() {
@@ -648,7 +1753,7 @@ final class SearchResultsViewController: NSViewController {
         rebuildButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Rebuild Index")
         rebuildButton.bezelStyle = .toolbar
         rebuildButton.isBordered = false
-        rebuildButton.toolTip = L("search.rebuildIndex")
+        rebuildButton.toolTip = L("search.rebuildIndex.tooltip")
         rebuildButton.contentTintColor = .secondaryLabelColor
         rebuildButton.target = self
         rebuildButton.action = #selector(rebuildButtonClicked)
@@ -766,6 +1871,20 @@ final class SearchResultsViewController: NSViewController {
         modifiedCol.sortDescriptorPrototype = NSSortDescriptor(key: "modified", ascending: false)
         tableView.addTableColumn(modifiedCol)
 
+        let createdCol = NSTableColumn(identifier: .columnCreated)
+        createdCol.title = L("search.col.dateCreated")
+        createdCol.width = 160
+        createdCol.minWidth = TableDensity.calculateDateMinWidth(for: currentFontSize)
+        createdCol.sortDescriptorPrototype = NSSortDescriptor(key: "created", ascending: false)
+        tableView.addTableColumn(createdCol)
+
+        let extensionCol = NSTableColumn(identifier: .columnExtension)
+        extensionCol.title = L("search.col.extension")
+        extensionCol.width = 80
+        extensionCol.minWidth = 56
+        extensionCol.sortDescriptorPrototype = NSSortDescriptor(key: "extension", ascending: true)
+        tableView.addTableColumn(extensionCol)
+
         let sizeCol = NSTableColumn(identifier: .columnSize)
         sizeCol.title = L("search.col.size")
         sizeCol.width = 80
@@ -773,20 +1892,138 @@ final class SearchResultsViewController: NSViewController {
         sizeCol.sortDescriptorPrototype = NSSortDescriptor(key: "size", ascending: false)
         tableView.addTableColumn(sizeCol)
 
+        setupColumnHeaderMenu()
+        applySavedColumnVisibility()
         updateColumnAlignments()
     }
 
-    /// 动态刷新列头与单元格文本对齐方式：
-    /// 仅大小与修改时间列在处于表格末列时采用右对齐以贴合视窗边界，处于非末列时统一左对齐保持纵向对齐线整洁；
-    /// 名称与路径文本列始终保持左对齐。
-    public func updateColumnAlignments() {
-        guard let lastCol = tableView.tableColumns.last else { return }
+    private func setupColumnHeaderMenu() {
+        let headerView = tableView.headerView ?? NSTableHeaderView()
+        if tableView.headerView == nil {
+            tableView.headerView = headerView
+        }
+        savedHeaderView = headerView
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = columnHeaderMenuDelegate
+        columnHeaderMenuDelegate.onNeedsUpdate = { [weak self] targetMenu in
+            self?.populateColumnHeaderMenu(targetMenu)
+        }
+        headerView.menu = menu
+    }
+
+    private func populateColumnHeaderMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for def in Self.canonicalColumnDefinitions {
+            let item = NSMenuItem(
+                title: L(def.titleKey),
+                action: #selector(toggleColumnVisibilityFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = def.id.rawValue
+            let isHidden = tableView.tableColumn(withIdentifier: def.id)?.isHidden ?? false
+            item.state = isHidden ? .off : .on
+            // 名称列锁定不可隐藏，确保结果列表始终具备可辨识主列
+            item.isEnabled = (def.id != .columnName)
+            menu.addItem(item)
+        }
+        menu.addItem(NSMenuItem.separator())
+        let resetItem = NSMenuItem(
+            title: L("search.col.resetDefault"),
+            action: #selector(resetColumnsMenuClicked),
+            keyEquivalent: ""
+        )
+        resetItem.target = self
+        menu.addItem(resetItem)
+    }
+
+    @objc private func toggleColumnVisibilityFromMenu(_ sender: NSMenuItem) {
+        guard let rawId = sender.representedObject as? String else { return }
+        let identifier = NSUserInterfaceItemIdentifier(rawId)
+        guard let col = tableView.tableColumn(withIdentifier: identifier) else { return }
+        setColumnHidden(!col.isHidden, for: identifier)
+    }
+
+    @objc private func resetColumnsMenuClicked() {
+        resetColumnsToDefault()
+    }
+
+    private func loadHiddenColumnIdentifiers() -> Set<NSUserInterfaceItemIdentifier> {
+        guard let stored = UserDefaults.standard.stringArray(forKey: Self.hiddenColumnsDefaultsKey) else {
+            return Self.defaultHiddenColumnIdentifiers
+        }
+        var hidden = Set(stored.map { NSUserInterfaceItemIdentifier($0) })
+        hidden.remove(.columnName)
+        return hidden
+    }
+
+    private func persistHiddenColumnIdentifiers() {
+        let hiddenRaw = tableView.tableColumns
+            .filter { $0.isHidden && $0.identifier != .columnName }
+            .map { $0.identifier.rawValue }
+            .sorted()
+        UserDefaults.standard.set(hiddenRaw, forKey: Self.hiddenColumnsDefaultsKey)
+    }
+
+    private func applySavedColumnVisibility() {
+        let hidden = loadHiddenColumnIdentifiers()
         for col in tableView.tableColumns {
-            let isLast = (col === lastCol)
+            col.isHidden = (col.identifier != .columnName) && hidden.contains(col.identifier)
+        }
+    }
+
+    /// 切换指定结果列表列的可见性，并同步持久化、清理失效排序与刷新末列对齐
+    func setColumnHidden(_ hidden: Bool, for identifier: NSUserInterfaceItemIdentifier) {
+        guard identifier != .columnName,
+              let col = tableView.tableColumn(withIdentifier: identifier) else { return }
+        col.isHidden = hidden
+        if hidden,
+           let activeSortKey = tableView.sortDescriptors.first?.key,
+           let colSortKey = col.sortDescriptorPrototype?.key,
+           activeSortKey == colSortKey {
+            tableView.sortDescriptors = []
+        }
+        persistHiddenColumnIdentifiers()
+        updateColumnAlignments()
+        tableView.reloadData()
+    }
+
+    /// 恢复结果列表默认列序、默认宽度与默认可见状态（显示名称/路径/修改日期/大小，隐藏创建日期/扩展名）
+    func resetColumnsToDefault() {
+        UserDefaults.standard.removeObject(forKey: Self.hiddenColumnsDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: "NSTableView Columns SearchResultsTable")
+        for (targetIndex, def) in Self.canonicalColumnDefinitions.enumerated() {
+            let currentIndex = tableView.column(withIdentifier: def.id)
+            if currentIndex >= 0 && currentIndex != targetIndex {
+                tableView.moveColumn(currentIndex, toColumn: targetIndex)
+            }
+            if let col = tableView.tableColumn(withIdentifier: def.id) {
+                col.width = def.width
+                col.isHidden = Self.defaultHiddenColumnIdentifiers.contains(def.id)
+            }
+        }
+        if let activeSortKey = tableView.sortDescriptors.first?.key,
+           let hiddenDef = Self.canonicalColumnDefinitions.first(where: { $0.sortKey == activeSortKey }),
+           Self.defaultHiddenColumnIdentifiers.contains(hiddenDef.id) {
+            tableView.sortDescriptors = []
+        }
+        updateColumnAlignments()
+        tableView.reloadData()
+    }
+
+    /// 动态刷新列头与单元格文本对齐方式：
+    /// 仅大小、修改日期与创建日期列在处于当前可见末列时采用右对齐以贴合视窗边界，处于非末列时统一左对齐保持纵向对齐线整洁；
+    /// 名称、路径与扩展名列始终保持左对齐。
+    public func updateColumnAlignments() {
+        guard let lastVisibleCol = tableView.tableColumns.last(where: { !$0.isHidden }) else { return }
+        for col in tableView.tableColumns {
+            let isLastVisible = (col === lastVisibleCol)
             let alignment: NSTextAlignment
             switch col.identifier {
-            case .columnSize, .columnModified:
-                alignment = isLast ? .right : .left
+            case .columnSize, .columnModified, .columnCreated:
+                alignment = isLastVisible ? .right : .left
             default:
                 alignment = .left
             }
@@ -808,8 +2045,11 @@ final class SearchResultsViewController: NSViewController {
         currentIconSize = TableDensity.calculateIconSize(for: fontSize)
         tableView.rowHeight = TableDensity.calculateRowHeight(for: fontSize)
 
-        if let modifiedCol = tableView.tableColumns.first(where: { $0.identifier == .columnModified }) {
-            modifiedCol.minWidth = TableDensity.calculateDateMinWidth(for: fontSize)
+        let dateMinWidth = TableDensity.calculateDateMinWidth(for: fontSize)
+        for id in [NSUserInterfaceItemIdentifier.columnModified, .columnCreated] {
+            if let dateCol = tableView.tableColumns.first(where: { $0.identifier == id }) {
+                dateCol.minWidth = dateMinWidth
+            }
         }
         tableView.reloadData()
     }
@@ -820,6 +2060,10 @@ final class SearchResultsViewController: NSViewController {
 
         let openWithItem = NSMenuItem(title: L("search.ctx.openWith"), action: nil, keyEquivalent: "")
         let openWithSubmenu = NSMenu(title: L("search.ctx.openWith"))
+        openWithSubmenu.delegate = openWithMenuDelegate
+        openWithMenuDelegate.onNeedsUpdate = { [weak self] submenu in
+            self?.populateOpenWithSubmenu(submenu)
+        }
         openWithItem.submenu = openWithSubmenu
         menu.addItem(openWithItem)
 
@@ -827,6 +2071,7 @@ final class SearchResultsViewController: NSViewController {
         qlItem.keyEquivalentModifierMask = []
         let revealItem = menu.addLocalizedItem("search.ctx.revealInFinder", action: #selector(revealSelected), keyEquivalent: "r")
         revealItem.keyEquivalentModifierMask = [.command]
+        menu.addLocalizedItem("search.ctx.filterByDirectory", action: #selector(filterByDirectorySelected), keyEquivalent: "")
         menu.addLocalizedItem("search.ctx.openInTerminal", action: #selector(openInTerminalSelected), keyEquivalent: "")
         menu.addLocalizedItem("search.ctx.getInfo", action: #selector(showInfoSelected), keyEquivalent: "i")
         menu.addItem(NSMenuItem.separator())
@@ -847,7 +2092,7 @@ final class SearchResultsViewController: NSViewController {
         menu.allowsContextMenuPlugIns = true
         menu.delegate = tableMenuDelegate
         tableMenuDelegate.onMenuWillOpen = { [weak self] m in
-            self?.updateOpenWithMenu(in: m)
+            self?.updateOpenWithItemAvailability(in: m)
         }
         tableView.menu = menu
     }
@@ -873,11 +2118,111 @@ final class SearchResultsViewController: NSViewController {
         return selectedResults.map { URL(fileURLWithPath: $0.path) }
     }
 
+    private static func normalizeOfflineCheckPath(_ path: String) -> String {
+        let expanded = (path as NSString).expandingTildeInPath
+        guard expanded.count > 1 else { return expanded }
+        var trimmed = expanded
+        while trimmed.count > 1 && trimmed.hasSuffix("/") {
+            trimmed.removeLast()
+        }
+        return trimmed
+    }
+
+    private static func offlineVolumeMountRoot(for path: String) -> String? {
+        let components = (path as NSString).pathComponents.filter { $0 != "/" }
+        guard components.count >= 2,
+              components[0].caseInsensitiveCompare("Volumes") == .orderedSame,
+              !components[1].isEmpty else {
+            return nil
+        }
+        return "/Volumes/" + components[1]
+    }
+
+    private static func isPath(_ target: String, insideOrEqual root: String) -> Bool {
+        if target.caseInsensitiveCompare(root) == .orderedSame {
+            return true
+        }
+        return target.lowercased().hasPrefix(root.lowercased() + "/")
+    }
+
+    /// Returns whether a search result belongs to an offline volume without querying the filesystem.
+    func isResultOffline(_ result: FfiSearchResult) -> Bool {
+        if result.isOffline { return true }
+        return isPathOfflineHandler?(result.path) ?? false
+    }
+
+    /// Returns whether a given path belongs to an offline volume without querying disk.
+    /// Root ("/") and bare "/Volumes" are never treated as offline due to descendant results.
+    func isPathOffline(_ path: String) -> Bool {
+        let normalized = Self.normalizeOfflineCheckPath(path)
+        if normalized.isEmpty || normalized == "/" || normalized.caseInsensitiveCompare("/Volumes") == .orderedSame {
+            return false
+        }
+        if let handler = isPathOfflineHandler {
+            return handler(normalized)
+        }
+        return results.contains { item in
+            guard item.isOffline else { return false }
+            let itemPath = Self.normalizeOfflineCheckPath(item.path)
+            if Self.isPath(normalized, insideOrEqual: itemPath) {
+                return true
+            }
+            if let mountRoot = Self.offlineVolumeMountRoot(for: itemPath),
+               Self.isPath(normalized, insideOrEqual: mountRoot) {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// Returns true when `items` is non-empty and all selected items are online; otherwise shows status notice.
+    private func requireAllOnline(_ items: [FfiSearchResult]) -> Bool {
+        guard !items.isEmpty else { return false }
+        if items.contains(where: { isResultOffline($0) }) {
+            showBlockedActionFeedback()
+            return false
+        }
+        return true
+    }
+
+    /// Returns true when every active contextual target (breadcrumb URL or table selection) is online.
+    private var areAllContextualTargetsOnline: Bool {
+        if let payload = activeContextMenuPayload, !payload.isEmpty {
+            if pathBar.isOfflinePathMode { return false }
+            return !payload.contains { isPathOffline($0.path) }
+        }
+        let selected = selectedResults
+        guard !selected.isEmpty else { return false }
+        return !selected.contains { isResultOffline($0) }
+    }
+
+    /// Re-render visible table cells and breadcrumb bar after volume status changes without clearing selection.
+    func refreshOfflineStates() {
+        let selected = tableView.selectedRowIndexes
+        tableView.reloadData()
+        if !selected.isEmpty {
+            let valid = IndexSet(selected.filter { $0 >= 0 && $0 < results.count })
+            if !valid.isEmpty {
+                tableView.selectRowIndexes(valid, byExtendingSelection: false)
+            }
+        }
+        hasRenderedBottomPath = false
+        updateBottomPath(for: selectedResult)
+        if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()
+        }
+    }
+
     /// 更新并渲染检索结果集合
-    func displayResults(_ results: [FfiSearchResult], preserveSelection: Bool) {
+    func displayResults(
+        _ results: [FfiSearchResult],
+        preserveSelection: Bool,
+        autoSelectFirstRow: Bool = false
+    ) {
         let previousPath = preserveSelection ? selectedResult?.path : nil
         self.results = results
-        // 图标按路径稳定复用，跨检索保留；展示串缓存随结果集更替释放，避免无限增长
+        hasAppliedResults = true
+        // 图标按类型稳定复用，跨检索保留；展示串缓存随结果集更替释放，避免无限增长
         dateTextCache.removeAll()
         sizeTextCache.removeAll()
 
@@ -887,17 +2232,25 @@ final class SearchResultsViewController: NSViewController {
             sortResults(by: key, ascending: descriptor.ascending)
         }
 
-        reloadWithFade()
+        // 高频击键刷新直接整表重绘，规避每次按键触发 150ms 离屏图层淡入合成与视觉残影
+        tableView.reloadData()
 
         if let previousPath,
            let matchIndex = self.results.firstIndex(where: { $0.path == previousPath }) {
             tableView.selectRowIndexes(IndexSet(integer: matchIndex), byExtendingSelection: false)
             tableView.scrollRowToVisible(matchIndex)
+        } else if !preserveSelection && autoSelectFirstRow && !self.results.isEmpty {
+            // 活跃检索自动预选首行，便于用户直接按 Return 打开最佳匹配项并实时预览底栏路径，不抢占搜索框焦点
+            tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            tableView.scrollRowToVisible(0)
         } else {
             tableView.deselectAll(nil)
         }
-        emptyStateContainer.isHidden = !(results.isEmpty && hasActiveSearchQuery)
+        renderEmptyState()
         notifySelectionChanged()
+        if QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible {
+            QLPreviewPanel.shared().reloadData()
+        }
     }
 
     /// 选中首行并滚动至可见视野
@@ -929,11 +2282,125 @@ final class SearchResultsViewController: NSViewController {
 
     // MARK: - Bottom Bar Interface
 
+    /// 直接依据已选中的检索条目 O(1) 更新底栏文件路径展示，消除结果集线性扫描
+    func updateBottomPath(for result: FfiSearchResult?) {
+        guard let result else {
+            applyBottomPath(path: nil, isDir: false, fileExtension: nil, isOffline: false)
+            return
+        }
+        applyBottomPath(
+            path: result.path,
+            isDir: result.isDir,
+            fileExtension: result.extension,
+            isOffline: isResultOffline(result)
+        )
+    }
+
     /// 更新底栏文件路径展示并协同控制与权限提示的互斥显隐
     func updateBottomPath(with path: String?) {
-        pathBar.url = path.map { URL(fileURLWithPath: $0) }
+        guard let path else {
+            applyBottomPath(path: nil, isDir: false, fileExtension: nil, isOffline: false)
+            return
+        }
+        let matched = results.first(where: { $0.path == path })
+        let isTargetOffline = matched.map { isResultOffline($0) } ?? isPathOffline(path)
+        let isTargetDir = matched?.isDir ?? false
+        applyBottomPath(
+            path: path,
+            isDir: isTargetDir,
+            fileExtension: matched?.extension,
+            isOffline: isTargetOffline
+        )
+    }
+
+    private func applyBottomPath(path: String?, isDir: Bool, fileExtension: String?, isOffline: Bool) {
+        if hasRenderedBottomPath,
+           lastRenderedBottomPath == path,
+           lastRenderedBottomOffline == isOffline {
+            updateBottomBarVisibility()
+            return
+        }
+        hasRenderedBottomPath = true
+        lastRenderedBottomPath = path
+        lastRenderedBottomOffline = isOffline
+
+        if let path, isOffline {
+            // 离线面包屑纯内存构建，绝不向 NSPathControl 写入 url 触发挂死挂载点 stat；
+            // 图标使用系统 UTType 全彩图标并配合柔和降透明态，视觉与原生访达路径栏保持统一。
+            applyOfflinePathItems(for: path, isDir: isDir, fileExtension: fileExtension)
+            pathBar.alphaValue = 0.68
+        } else {
+            pathBar.clearOfflineState()
+            if path == nil {
+                pathBar.pathItems = []
+            }
+            pathBar.url = path.map { URL(fileURLWithPath: $0) }
+            pathBar.alphaValue = 1.0
+        }
         pathBar.toolTip = path
         updateBottomBarVisibility()
+    }
+
+    private static let bootVolumeDisplayName: String = {
+        let name = FileManager.default.displayName(atPath: "/")
+        return name.isEmpty ? "/" : name
+    }()
+
+    private func applyOfflinePathItems(for path: String, isDir isTargetDir: Bool, fileExtension: String?) {
+        let folderIcon = nonBlockingTypeIcon(for: "", isDir: true)
+        let volumeIcon = nonBlockingVolumeIcon()
+        let components = (path as NSString).pathComponents.filter { $0 != "/" }
+        var items: [NSPathControlItem] = []
+        var urls: [URL] = []
+
+        // `/Volumes/<卷名>/...` 与 macOS 访达路径栏保持一致：直接以卷名与磁盘图标起头，省去生硬的 `/ > Volumes >` 前缀
+        let startIndex: Int
+        var current: String
+        if components.count >= 2 && components[0].caseInsensitiveCompare("Volumes") == .orderedSame {
+            let volumeName = components[1]
+            let volumePath = "/\(components[0])/\(volumeName)"
+            let volumeItem = NSPathControlItem()
+            volumeItem.title = volumeName
+            volumeItem.image = volumeIcon
+            items.append(volumeItem)
+            urls.append(URL(fileURLWithPath: volumePath, isDirectory: true))
+            startIndex = 2
+            current = volumePath
+        } else {
+            let rootItem = NSPathControlItem()
+            rootItem.title = Self.bootVolumeDisplayName
+            rootItem.image = volumeIcon
+            items.append(rootItem)
+            urls.append(URL(fileURLWithPath: "/", isDirectory: true))
+            startIndex = 0
+            current = ""
+        }
+
+        if startIndex < components.count {
+            for idx in startIndex..<components.count {
+                let component = components[idx]
+                current += "/" + component
+                let isLast = idx == components.count - 1
+                let itemIsDir = isLast ? isTargetDir : true
+                let item = NSPathControlItem()
+                item.title = component
+                if itemIsDir {
+                    item.image = (isLast && Self.needsCustomBundleIcon(path: current))
+                        ? nonBlockingTypeIcon(for: current, isDir: true, fileExtension: fileExtension)
+                        : folderIcon
+                } else {
+                    item.image = nonBlockingTypeIcon(
+                        for: current,
+                        isDir: false,
+                        fileExtension: isLast ? fileExtension : nil
+                    )
+                }
+                items.append(item)
+                urls.append(URL(fileURLWithPath: current, isDirectory: itemIsDir))
+            }
+        }
+
+        pathBar.setOfflineItems(items, urls: urls)
     }
 
     /// 更新当前完全磁盘访问权限状态并刷新底栏互斥展示
@@ -946,7 +2413,8 @@ final class SearchResultsViewController: NSViewController {
     /// 根据当前路径选中状态与完全磁盘访问权限协同控制显隐让位
     private func updateBottomBarVisibility() {
         // 路径展示优先级高于权限提示：有选中路径时始终让位给路径
-        let showFDAHint = pathBar.url == nil && !hasFullDiskAccess
+        let hasBreadcrumb = pathBar.url != nil || !pathBar.pathItems.isEmpty
+        let showFDAHint = !hasBreadcrumb && !hasFullDiskAccess
         pathBar.isHidden = showFDAHint
         fdaHintButton.isHidden = !showFDAHint
     }
@@ -972,6 +2440,27 @@ final class SearchResultsViewController: NSViewController {
         rebuildContainer.alphaValue = 1.0
         statusLabel.stringValue = persistedStatusText
         statusLabel.textColor = .secondaryLabelColor
+    }
+
+    /// Display a brief non-blocking notice in the status bar when an offline or disallowed
+    /// filesystem operation is blocked, then automatically restore persisted status.
+    func showBlockedActionFeedback(_ message: String? = nil) {
+        let displayMessage = message ?? L("search.offline.actionBlocked")
+        isShowingTemporaryStatus = true
+        statusFeedbackCapsule.stopSpin()
+        statusFeedbackCapsule.isHidden = true
+        statusFeedbackCapsule.alphaValue = 0.0
+        statusLabel.alphaValue = 1.0
+        rebuildContainer.alphaValue = 1.0
+        statusLabel.stringValue = displayMessage
+        statusLabel.textColor = .systemOrange
+
+        temporaryStatusWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.cancelTemporaryStatus()
+        }
+        temporaryStatusWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: workItem)
     }
 
     /// 当后台正在增量索引或扫描时，点击刷新按钮触发的状态栏微反馈
@@ -1046,28 +2535,23 @@ final class SearchResultsViewController: NSViewController {
     // MARK: - Notifications
 
     @objc func onLanguageChanged() {
-        let columns: [(NSUserInterfaceItemIdentifier, String)] = [
-            (.columnName, "search.col.name"),
-            (.columnPath, "search.col.path"),
-            (.columnModified, "search.col.dateModified"),
-            (.columnSize, "search.col.size"),
-        ]
-        for (identifier, key) in columns {
-            tableView.tableColumn(withIdentifier: identifier)?.title = L(key)
+        for def in Self.canonicalColumnDefinitions {
+            tableView.tableColumn(withIdentifier: def.id)?.title = L(def.titleKey)
         }
         tableView.headerView?.needsDisplay = true
         tableView.menu?.refreshLocalizedTitles()
-        // 格式化结果随语言环境变化，缓存需整体失效
+        // 格式化结果与应用本地化显示名随语言环境变化，缓存需整体失效
         dateTextCache.removeAll()
         sizeTextCache.removeAll()
+        openWithAppNameCache.removeAll()
         tableView.reloadData()
-        rebuildButton.toolTip = L("search.rebuildIndex")
+        rebuildButton.toolTip = L("search.rebuildIndex.tooltip")
         rebuildButton.setAccessibilityLabel(L("search.rebuildIndex"))
         if isShowingTemporaryStatus {
             statusLabel.stringValue = L("search.backgroundRefresh")
             statusFeedbackCapsule.label.stringValue = L("search.backgroundRefresh")
         }
-        emptyTitleLabel.stringValue = L("search.empty.title")
+        renderEmptyState()
         updateFDAButtonContent()
     }
 
@@ -1103,7 +2587,15 @@ final class SearchResultsViewController: NSViewController {
     }
 
     @objc private func pathBarClicked() {
+        guard !pathBar.isOfflinePathMode else {
+            showBlockedActionFeedback()
+            return
+        }
         if let url = pathBar.clickedPathItem?.url ?? pathBar.url {
+            guard !isPathOffline(url.path) else {
+                showBlockedActionFeedback()
+                return
+            }
             delegate?.searchResultsDidConsumeResult()
             revealFilesHandler([url])
         }
@@ -1140,8 +2632,10 @@ final class SearchResultsViewController: NSViewController {
     private func notifySelectionChanged() {
         let current = selectedResult
         let currentPath = current?.path
-        if currentPath != lastReportedPath {
+        let currentOffline = current.map { isResultOffline($0) }
+        if currentPath != lastReportedPath || currentOffline != lastReportedOffline {
             lastReportedPath = currentPath
+            lastReportedOffline = currentOffline
             delegate?.searchResultsDidSelect(result: current)
         }
     }
@@ -1155,7 +2649,7 @@ final class SearchResultsViewController: NSViewController {
 
     @objc func copyFile(_ sender: Any? = nil) {
         let selected = selectedResults
-        guard !selected.isEmpty else { return }
+        guard requireAllOnline(selected) else { return }
         delegate?.searchResultsDidConsumeResult()
         let urls = selected.map { NSURL(fileURLWithPath: $0.path) }
         let pasteboard = NSPasteboard.general
@@ -1166,7 +2660,8 @@ final class SearchResultsViewController: NSViewController {
     }
 
     @objc func quickLookSelected(_ sender: Any? = nil) {
-        guard !selectedResults.isEmpty else { return }
+        let selected = selectedResults
+        guard requireAllOnline(selected) else { return }
         delegate?.searchResultsDidConsumeResult()
         let panel = QLPreviewPanel.shared()
         // 先显示，让面板经响应链接管 dataSource（显示时同步挂载 controller），再刷新
@@ -1175,15 +2670,24 @@ final class SearchResultsViewController: NSViewController {
     }
 
     @objc func showInfoSelected(_ sender: Any? = nil) {
-        openFinderInfoWindow(for: selectedResults.map(\.path))
+        let selected = selectedResults
+        guard requireAllOnline(selected) else { return }
+        openFinderInfoWindow(for: selected.map(\.path))
     }
 
     private func openFinderInfoWindow(for paths: [String]) {
-        let targets = paths.prefix(10).filter { FileManager.default.fileExists(atPath: $0) }
-        guard !targets.isEmpty else { return }
+        guard !paths.contains(where: { isPathOffline($0) }) else {
+            showBlockedActionFeedback()
+            return
+        }
+        let candidatePaths = Array(paths.prefix(10))
+        guard !candidatePaths.isEmpty else { return }
         delegate?.searchResultsDidConsumeResult()
 
+        // 将 fileExists 过滤也放入后台队列，避免失联网络挂载点在点击“显示简介”时阻塞主线程
         DispatchQueue.global(qos: .userInitiated).async {
+            let targets = candidatePaths.filter { FileManager.default.fileExists(atPath: $0) }
+            guard !targets.isEmpty else { return }
             let statements = targets.map { path -> String in
                 let escaped = path
                     .replacingOccurrences(of: "\\", with: "\\\\")
@@ -1226,7 +2730,7 @@ final class SearchResultsViewController: NSViewController {
 
     @objc func openSelected(_ sender: Any? = nil) {
         let selected = selectedResults
-        guard !selected.isEmpty else { return }
+        guard requireAllOnline(selected) else { return }
         for item in selected {
             delegate?.searchResultsDidDoubleClick(result: item)
         }
@@ -1234,7 +2738,7 @@ final class SearchResultsViewController: NSViewController {
 
     @objc func revealSelected(_ sender: Any? = nil) {
         let selected = selectedResults
-        guard !selected.isEmpty else { return }
+        guard requireAllOnline(selected) else { return }
         delegate?.searchResultsDidConsumeResult()
         // 统一调用 activateFileViewerSelecting 接口，无论单选或多选、文件或文件夹，
         // 均在父级视窗中精准定位并高亮目标项，规避 selectFile(nil, ...) 导致的直接打开文档或穿透进入文件夹缺陷
@@ -1244,38 +2748,58 @@ final class SearchResultsViewController: NSViewController {
 
     @objc func openInTerminalSelected(_ sender: Any? = nil) {
         let selected = selectedResults
-        guard !selected.isEmpty else { return }
+        guard requireAllOnline(selected) else { return }
         delegate?.searchResultsDidConsumeResult()
         let urls = selected.map { URL(fileURLWithPath: $0.path) }
         openInTerminalHandler(urls)
     }
 
-    /// 动态构建“打开方式”子菜单项列表
-    private func updateOpenWithMenu(in menu: NSMenu) {
+    /// 主右键菜单展开时仅执行纯内存可用性判定，不阻塞查询 LaunchServices
+    private func updateOpenWithItemAvailability(in menu: NSMenu) {
         guard let openWithItem = menu.items.first(where: {
             $0.submenu?.title == L("search.ctx.openWith") || $0.title == L("search.ctx.openWith")
-        }), let submenu = openWithItem.submenu else { return }
+        }) else { return }
+        openWithItem.isEnabled = areAllContextualTargetsOnline && !contextualURLs.isEmpty
+    }
+
+    /// 仅在用户真正悬停展开“打开方式”子菜单时按需填充候选应用，并对显示名与 16pt 图标做内存复用
+    private func populateOpenWithSubmenu(_ submenu: NSMenu) {
         submenu.removeAllItems()
 
-        let urls = contextualURLs
-        guard let firstURL = urls.first else {
-            openWithItem.isEnabled = false
+        // Skip NSWorkspace queries entirely when target paths are offline so Finder/LaunchServices never block.
+        guard areAllContextualTargetsOnline, let firstURL = contextualURLs.first else {
             return
         }
-        openWithItem.isEnabled = true
 
         let appURLs = NSWorkspace.shared.urlsForApplications(toOpen: firstURL)
         let defaultAppURL = NSWorkspace.shared.urlForApplication(toOpen: firstURL)
 
         for appURL in appURLs {
-            let appName = FileManager.default.displayName(atPath: appURL.path)
+            let appPath = appURL.path
+            let appName: String
+            if let cachedName = openWithAppNameCache[appPath] {
+                appName = cachedName
+            } else {
+                let resolved = FileManager.default.displayName(atPath: appPath)
+                openWithAppNameCache[appPath] = resolved
+                appName = resolved
+            }
+
             let item = NSMenuItem(title: appName, action: #selector(openWithApp(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = appURL
-            let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-            icon.size = NSSize(width: 16, height: 16)
+
+            let icon: NSImage
+            if let cachedIcon = openWithAppIconCache[appPath] {
+                icon = cachedIcon
+            } else {
+                let loaded = NSWorkspace.shared.icon(forFile: appPath)
+                loaded.size = NSSize(width: 16, height: 16)
+                openWithAppIconCache[appPath] = loaded
+                icon = loaded
+            }
             item.image = icon
-            if let defaultURL = defaultAppURL, defaultURL.path == appURL.path {
+            if let defaultURL = defaultAppURL, defaultURL.path == appPath {
                 item.state = .on
             }
             submenu.addItem(item)
@@ -1294,6 +2818,10 @@ final class SearchResultsViewController: NSViewController {
         guard let appURL = sender.representedObject as? URL else { return }
         let urls = contextualURLs
         guard !urls.isEmpty else { return }
+        guard areAllContextualTargetsOnline else {
+            showBlockedActionFeedback()
+            return
+        }
         delegate?.searchResultsDidConsumeResult()
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
@@ -1303,6 +2831,10 @@ final class SearchResultsViewController: NSViewController {
     @objc func chooseOtherAppToOpen(_ sender: Any? = nil) {
         let urls = contextualURLs
         guard !urls.isEmpty else { return }
+        guard areAllContextualTargetsOnline else {
+            showBlockedActionFeedback()
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -1318,15 +2850,58 @@ final class SearchResultsViewController: NSViewController {
         }
     }
 
+    @objc func filterByDirectorySelected(_ sender: Any? = nil) {
+        guard selectedResults.count == 1,
+              let item = selectedResults.first,
+              let targetDir = scopeFilterDirectory(for: item) else {
+            return
+        }
+        delegate?.searchResultsDidConsumeResult()
+        delegate?.searchResultsDidRequestScopeFilter(path: targetDir)
+    }
+
+    private func scopeFilterDirectory(for result: FfiSearchResult) -> String? {
+        var path = result.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        guard !path.isEmpty else { return nil }
+        if result.isDir {
+            return path
+        }
+        guard path != "/" else { return nil }
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty ? nil : parent
+    }
+
+    /// 判定路径是否位于 `/Volumes/<entry>` 挂载卷命名空间内，供主线程免磁盘探测守卫使用
+    private static func isUnderVolumesNamespace(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        guard lower.hasPrefix("/volumes/") else { return false }
+        let remainder = lower.dropFirst("/volumes/".count)
+        return !remainder.isEmpty && !remainder.allSatisfy { $0 == "/" }
+    }
+
+    /// Resolve target directory vs parent folder without probing disconnected or mounted `/Volumes/*` paths on disk.
+    private func resolveExcludedDirectoryURL(for url: URL) -> URL {
+        if let matched = results.first(where: { $0.path == url.path }) {
+            return matched.isDir ? url : url.deletingLastPathComponent()
+        }
+        if isPathOffline(url.path) || !areAllContextualTargetsOnline || pathBar.isOfflinePathMode || Self.isUnderVolumesNamespace(url.path) {
+            return url.hasDirectoryPath ? url : url.deletingLastPathComponent()
+        }
+        return TerminalLauncher.directoryURL(for: url)
+    }
+
     @objc func excludeDirectorySelected(_ sender: Any? = nil) {
         guard let url = contextualURLs.first else { return }
-        let dirURL = TerminalLauncher.directoryURL(for: url)
+        let dirURL = resolveExcludedDirectoryURL(for: url)
         onExcludeDirectory?(dirURL.path)
     }
 
     @objc func moveToTrashSelected(_ sender: Any? = nil) {
         let selected = selectedResults
-        guard !selected.isEmpty else { return }
+        guard requireAllOnline(selected) else { return }
 
         confirmTrashIfNeeded(count: selected.count) { [weak self] confirmed in
             guard let self = self, confirmed else { return }
@@ -1431,11 +3006,15 @@ final class SearchResultsViewController: NSViewController {
         alert.beginSheetModal(for: window, completionHandler: nil)
     }
 
-    private func playTrashSound() {
+    private static let trashSound: NSSound? = {
         let soundPath = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/dock/drag to trash.aif"
-        if FileManager.default.fileExists(atPath: soundPath) {
-            NSSound(contentsOfFile: soundPath, byReference: true)?.play()
-        }
+        guard FileManager.default.fileExists(atPath: soundPath) else { return nil }
+        return NSSound(contentsOfFile: soundPath, byReference: true)
+    }()
+
+    private func playTrashSound() {
+        Self.trashSound?.stop()
+        Self.trashSound?.play()
     }
 
     private func sortResults(by key: String, ascending: Bool) {
@@ -1452,6 +3031,25 @@ final class SearchResultsViewController: NSViewController {
                 if a.modified < b.modified { cmp = .orderedAscending }
                 else if a.modified > b.modified { cmp = .orderedDescending }
                 else { cmp = .orderedSame }
+            case "created":
+                if a.created < b.created { cmp = .orderedAscending }
+                else if a.created > b.created { cmp = .orderedDescending }
+                else { cmp = .orderedSame }
+            case "extension":
+                let extA = a.isDir ? "" : a.extension
+                let extB = b.isDir ? "" : b.extension
+                // 无论升降序，有效扩展名始终排在文件夹或无扩展名文件之前，保证有意义后缀立即可见
+                if extA.isEmpty != extB.isEmpty {
+                    return !extA.isEmpty
+                }
+                if extA.isEmpty {
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                }
+                let extCmp = extA.localizedCaseInsensitiveCompare(extB)
+                if extCmp == .orderedSame {
+                    return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                }
+                return ascending ? extCmp == .orderedAscending : extCmp == .orderedDescending
             case "size":
                 if a.size < b.size { cmp = .orderedAscending }
                 else if a.size > b.size { cmp = .orderedDescending }
@@ -1463,11 +3061,86 @@ final class SearchResultsViewController: NSViewController {
         }
     }
 
-    func iconForFile(at path: String) -> NSImage {
-        if let cached = iconCache.object(forKey: path as NSString) { return cached }
-        let icon = NSWorkspace.shared.icon(forFile: path)
-        iconCache.setObject(icon, forKey: path as NSString)
+    private static func fileExtensionLowercased(of path: String) -> String {
+        let lastSlash = path.lastIndex(of: "/")
+        let nameStart = lastSlash.map { path.index(after: $0) } ?? path.startIndex
+        guard nameStart < path.endIndex,
+              let dot = path[nameStart...].lastIndex(of: "."),
+              dot > nameStart else {
+            return ""
+        }
+        let extStart = path.index(after: dot)
+        guard extStart < path.endIndex else { return "" }
+        return path[extStart...].lowercased()
+    }
+
+    /// 仅应用程序包与系统偏好面板具有独立自定义图标，普通文件与常规目录统一复用扩展名/类型纯内存图标
+    private static func needsCustomBundleIcon(path: String) -> Bool {
+        let ext = fileExtensionLowercased(of: path)
+        return ext == "app" || ext == "prefpane"
+    }
+
+    private func nonBlockingVolumeIcon() -> NSImage {
+        let key = "__type_icon_volume__"
+        if let cached = typeIconCache[key] { return cached }
+        let icon = NSWorkspace.shared.icon(for: .volume)
+        typeIconCache[key] = icon
         return icon
+    }
+
+    private func nonBlockingTypeIcon(for path: String, isDir: Bool, fileExtension: String? = nil) -> NSImage {
+        if isDir && !Self.needsCustomBundleIcon(path: path) {
+            let key = "__type_icon_dir__"
+            if let cached = typeIconCache[key] { return cached }
+            let icon = NSWorkspace.shared.icon(for: .folder)
+            typeIconCache[key] = icon
+            return icon
+        }
+        let ext = (fileExtension?.isEmpty == false ? fileExtension!.lowercased() : Self.fileExtensionLowercased(of: path))
+        let key = "__type_icon_ext_\(ext)"
+        if let cached = typeIconCache[key] { return cached }
+        let utType = ext.isEmpty ? UTType.data : (UTType(filenameExtension: ext) ?? .data)
+        let icon = NSWorkspace.shared.icon(for: utType)
+        typeIconCache[key] = icon
+        return icon
+    }
+
+    func iconForFile(at path: String, isDir: Bool = false, isOffline: Bool = false, fileExtension: String? = nil) -> NSImage {
+        // 离线条目与 `/Volumes/*` 绝不触发磁盘 stat 或自定义应用包磁盘图标查询，
+        // 统一走基于扩展名/UTType 的 O(1) 纯内存全彩系统图标缓存，兼顾零阻塞与原生视觉一致性。
+        if isOffline || isPathOffline(path) {
+            return nonBlockingTypeIcon(for: path, isDir: isDir, fileExtension: fileExtension)
+        }
+        if !Self.isUnderVolumesNamespace(path),
+           Self.needsCustomBundleIcon(path: path),
+           let cached = iconCache.object(forKey: path as NSString) {
+            return cached
+        }
+        return nonBlockingTypeIcon(for: path, isDir: isDir, fileExtension: fileExtension)
+    }
+
+    /// 异步加载应用包（.app / .prefPane）的专属自定义图标并回填仍展示该路径的单元格
+    private func loadCustomBundleIconIfNeeded(for result: FfiSearchResult, isOffline: Bool, into cell: SearchNameTableCellView) {
+        let path = result.path
+        cell.representedPath = path
+        guard !isOffline,
+              !isPathOffline(path),
+              !Self.isUnderVolumesNamespace(path),
+              Self.needsCustomBundleIcon(path: path),
+              iconCache.object(forKey: path as NSString) == nil else {
+            return
+        }
+        let provider = workspaceIconProvider
+        iconLoadQueue.async { [weak self, weak cell] in
+            let loaded = provider(path)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.iconCache.setObject(loaded, forKey: path as NSString)
+                if let cell, cell.representedPath == path {
+                    cell.imageView?.image = loaded
+                }
+            }
+        }
     }
 
     // MARK: - NSServicesRequests
@@ -1488,11 +3161,25 @@ final class SearchResultsViewController: NSViewController {
             return super.validRequestor(forSendType: sendType, returnType: returnType)
         }
 
+        // File-object and directory services require all targets to be online; never query disk for offline entries.
+        if ServicesPasteboard.fileObjectTypes.contains(sendType) || ServicesPasteboard.directoryTypes.contains(sendType) {
+            guard areAllContextualTargetsOnline else {
+                return super.validRequestor(forSendType: sendType, returnType: returnType)
+            }
+        }
+
         // 若服务请求特定于目录容器类型，精准校验目标载荷是否包含实际目录实体
         if ServicesPasteboard.directoryTypes.contains(sendType) {
             let containsDirectory: Bool
             if let payload = activeContextMenuPayload, !payload.isEmpty {
                 containsDirectory = payload.contains { url in
+                    guard !isPathOffline(url.path) else { return false }
+                    if let matched = results.first(where: { $0.path == url.path }) {
+                        return matched.isDir
+                    }
+                    if Self.isUnderVolumesNamespace(url.path) {
+                        return url.hasDirectoryPath || url.pathExtension.isEmpty
+                    }
                     var isDir: ObjCBool = false
                     if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
                         return isDir.boolValue
@@ -1500,7 +3187,7 @@ final class SearchResultsViewController: NSViewController {
                     return url.hasDirectoryPath || url.pathExtension.isEmpty
                 }
             } else {
-                containsDirectory = selectedResults.contains { $0.isDir }
+                containsDirectory = selectedResults.contains { $0.isDir && !isResultOffline($0) }
             }
             guard containsDirectory else {
                 return super.validRequestor(forSendType: sendType, returnType: returnType)
@@ -1518,6 +3205,7 @@ extension SearchResultsViewController: NSServicesMenuRequestor {
     func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
         let targetURLs = contextualURLs
         guard !targetURLs.isEmpty else { return false }
+        let allowFileObjects = areAllContextualTargetsOnline
 
         var didWrite = false
         pboard.clearContents()
@@ -1525,14 +3213,13 @@ extension SearchResultsViewController: NSServicesMenuRequestor {
         let paths = targetURLs.map(\.path)
         let pathString = paths.joined(separator: "\n")
 
-        if types.contains(where: { ServicesPasteboard.fileObjectTypes.contains($0) }) {
+        if allowFileObjects && types.contains(where: { ServicesPasteboard.fileObjectTypes.contains($0) }) {
             pboard.writeObjects(targetURLs as [NSURL])
             didWrite = true
         }
 
-        let filenamesType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
-        if types.contains(filenamesType) {
-            pboard.setPropertyList(paths, forType: filenamesType)
+        if allowFileObjects && types.contains(ServicesPasteboard.filenamesType) {
+            pboard.setPropertyList(paths, forType: ServicesPasteboard.filenamesType)
             didWrite = true
         }
 
@@ -1563,7 +3250,11 @@ extension SearchResultsViewController: NSTableViewDataSource {
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
         guard row >= 0, row < results.count else { return nil }
-        return NSURL(fileURLWithPath: results[row].path)
+        let result = results[row]
+        if isResultOffline(result) {
+            return nil
+        }
+        return NSURL(fileURLWithPath: result.path)
     }
 
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
@@ -1589,20 +3280,41 @@ extension SearchResultsViewController: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < results.count, let column = tableColumn else { return nil }
         let result = results[row]
+        let offline = isResultOffline(result)
         let colID = column.identifier
-        let isLastColumn = tableView.tableColumns.last?.identifier == colID
+        let isLastVisibleColumn = tableView.tableColumns.last(where: { !$0.isHidden })?.identifier == colID
 
         switch colID {
         case .columnName:
-            return nameCell(for: result, in: tableView)
+            return nameCell(for: result, isOffline: offline, in: tableView)
         case .columnPath:
-            return pathCell(for: result, in: tableView)
+            return pathCell(for: result, isOffline: offline, in: tableView)
         case .columnModified:
             return textCell(
                 string: dateText(for: TimeInterval(result.modified)),
                 font: fontCache.regular,
-                color: .labelColor,
-                alignment: isLastColumn ? .right : .left,
+                color: offline ? NSColor.labelColor.withAlphaComponent(0.55) : .labelColor,
+                alignment: isLastVisibleColumn ? .right : .left,
+                identifier: colID,
+                in: tableView
+            )
+        case .columnCreated:
+            let createdStr = result.created == 0 ? "--" : dateText(for: TimeInterval(result.created))
+            return textCell(
+                string: createdStr,
+                font: fontCache.monospacedDigit,
+                color: offline ? NSColor.labelColor.withAlphaComponent(0.55) : .labelColor,
+                alignment: isLastVisibleColumn ? .right : .left,
+                identifier: colID,
+                in: tableView
+            )
+        case .columnExtension:
+            let extStr = (result.isDir || result.extension.isEmpty) ? "--" : result.extension
+            return textCell(
+                string: extStr,
+                font: fontCache.regular,
+                color: offline ? NSColor.secondaryLabelColor.withAlphaComponent(0.55) : .secondaryLabelColor,
+                alignment: .left,
                 identifier: colID,
                 in: tableView
             )
@@ -1611,8 +3323,8 @@ extension SearchResultsViewController: NSTableViewDelegate {
             return textCell(
                 string: str,
                 font: fontCache.monospacedDigit,
-                color: .secondaryLabelColor,
-                alignment: isLastColumn ? .right : .left,
+                color: offline ? NSColor.secondaryLabelColor.withAlphaComponent(0.55) : .secondaryLabelColor,
+                alignment: isLastVisibleColumn ? .right : .left,
                 identifier: colID,
                 in: tableView
             )
@@ -1650,13 +3362,14 @@ extension SearchResultsViewController: NSTableViewDelegate {
         return text
     }
 
-    private func nameCell(for result: FfiSearchResult, in tableView: NSTableView) -> NSTableCellView {
+    private func nameCell(for result: FfiSearchResult, isOffline: Bool, in tableView: NSTableView) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier("NameCell")
         if let reused = tableView.makeView(withIdentifier: id, owner: nil) as? SearchNameTableCellView {
-            reused.imageView?.image = iconForFile(at: result.path)
+            reused.imageView?.image = iconForFile(at: result.path, isDir: result.isDir, isOffline: isOffline, fileExtension: result.extension)
             reused.updateIconSize(currentIconSize)
             reused.applyFonts(regular: fontCache.regular, bold: fontCache.bold)
-            reused.configure(name: result.name, matchPositions: result.matchPositions)
+            reused.configure(name: result.name, matchPositions: result.matchPositions, isOffline: isOffline)
+            loadCustomBundleIconIfNeeded(for: result, isOffline: isOffline, into: reused)
             return reused
         }
 
@@ -1666,7 +3379,7 @@ extension SearchResultsViewController: NSTableViewDelegate {
         let imageView = NSImageView()
         imageView.translatesAutoresizingMaskIntoConstraints = false
         imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.image = iconForFile(at: result.path)
+        imageView.image = iconForFile(at: result.path, isDir: result.isDir, isOffline: isOffline, fileExtension: result.extension)
         cell.addSubview(imageView)
         cell.imageView = imageView
 
@@ -1698,16 +3411,17 @@ extension SearchResultsViewController: NSTableViewDelegate {
 
         cell.setIconConstraints(width: widthConstraint, height: heightConstraint)
         cell.applyFonts(regular: fontCache.regular, bold: fontCache.bold)
-        cell.configure(name: result.name, matchPositions: result.matchPositions)
+        cell.configure(name: result.name, matchPositions: result.matchPositions, isOffline: isOffline)
+        loadCustomBundleIconIfNeeded(for: result, isOffline: isOffline, into: cell)
 
         return cell
     }
 
-    private func pathCell(for result: FfiSearchResult, in tableView: NSTableView) -> NSTableCellView {
+    private func pathCell(for result: FfiSearchResult, isOffline: Bool, in tableView: NSTableView) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier("PathCell")
         if let reused = tableView.makeView(withIdentifier: id, owner: nil) as? SearchPathTableCellView {
             reused.applyFonts(regular: fontCache.regular, bold: fontCache.bold)
-            reused.configure(fullPath: result.path, parentMatchPositions: result.parentMatchPositions)
+            reused.configure(fullPath: result.path, parentMatchPositions: result.parentMatchPositions, isOffline: isOffline)
             return reused
         }
 
@@ -1735,7 +3449,7 @@ extension SearchResultsViewController: NSTableViewDelegate {
         ])
 
         cell.applyFonts(regular: fontCache.regular, bold: fontCache.bold)
-        cell.configure(fullPath: result.path, parentMatchPositions: result.parentMatchPositions)
+        cell.configure(fullPath: result.path, parentMatchPositions: result.parentMatchPositions, isOffline: isOffline)
         return cell
     }
 
@@ -1786,7 +3500,7 @@ extension SearchResultsViewController: NSTableViewDelegate {
 extension SearchResultsViewController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.representedObject as? String == "search.ctx.services" || menuItem.hasSubmenu {
-            return !contextualURLs.isEmpty
+            return areAllContextualTargetsOnline
         }
         switch menuItem.action {
         case #selector(openSelected),
@@ -1795,21 +3509,32 @@ extension SearchResultsViewController: NSMenuItemValidation {
              #selector(openInTerminalSelected),
              #selector(showInfoSelected),
              #selector(copyFile),
-             #selector(copyPath),
-             #selector(copyName),
              #selector(moveToTrashSelected),
              #selector(openWithApp(_:)),
-             #selector(chooseOtherAppToOpen(_:)),
+             #selector(chooseOtherAppToOpen(_:)):
+            return areAllContextualTargetsOnline
+        case #selector(copyPath),
+             #selector(copyName),
              #selector(excludeDirectorySelected(_:)):
             return !contextualURLs.isEmpty
+        case #selector(filterByDirectorySelected):
+            guard selectedResults.count == 1, let item = selectedResults.first else { return false }
+            return scopeFilterDirectory(for: item) != nil
         case #selector(breadcrumbRevealInFinder(_:)),
              #selector(breadcrumbOpenItem(_:)),
              #selector(breadcrumbOpenInTerminal(_:)),
              #selector(breadcrumbShowInfo(_:)):
             guard let url = menuItem.representedObject as? URL else { return false }
+            guard !pathBar.isOfflinePathMode, !isPathOffline(url.path) else { return false }
+            if Self.isUnderVolumesNamespace(url.path) {
+                return true
+            }
             return FileManager.default.fileExists(atPath: url.path)
         case #selector(breadcrumbFilterByDirectory(_:)):
             guard let url = menuItem.representedObject as? URL else { return false }
+            if pathBar.isOfflinePathMode || isPathOffline(url.path) || Self.isUnderVolumesNamespace(url.path) {
+                return selectedResult?.path != url.path || selectedResult?.isDir == true
+            }
             var isDir: ObjCBool = false
             return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
         case #selector(breadcrumbCopyPath(_:)),
@@ -1824,8 +3549,16 @@ extension SearchResultsViewController: NSMenuItemValidation {
 // MARK: - QLPreviewPanelDataSource & QLPreviewPanelDelegate
 
 extension SearchResultsViewController: QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+    private var previewableResults: [FfiSearchResult] {
+        let selected = selectedResults
+        guard !selected.isEmpty, !selected.contains(where: { isResultOffline($0) }) else {
+            return []
+        }
+        return selected
+    }
+
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
-        !selectedResults.isEmpty
+        !previewableResults.isEmpty
     }
 
     override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
@@ -1839,11 +3572,11 @@ extension SearchResultsViewController: QLPreviewPanelDataSource, QLPreviewPanelD
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        selectedResults.count
+        previewableResults.count
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
-        let items = selectedResults
+        let items = previewableResults
         guard index >= 0, index < items.count else { return nil }
         return NSURL(fileURLWithPath: items[index].path)
     }
@@ -1910,12 +3643,20 @@ extension SearchResultsViewController: BreadcrumbPathControlDelegate {
 
     @objc private func breadcrumbRevealInFinder(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
+        guard !pathBar.isOfflinePathMode, !isPathOffline(url.path) else {
+            showBlockedActionFeedback()
+            return
+        }
         delegate?.searchResultsDidConsumeResult()
         revealFilesHandler([url])
     }
 
     @objc private func breadcrumbOpenItem(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
+        guard !pathBar.isOfflinePathMode, !isPathOffline(url.path) else {
+            showBlockedActionFeedback()
+            return
+        }
         delegate?.searchResultsDidConsumeResult()
         NSWorkspace.shared.open(url)
     }
@@ -1932,6 +3673,10 @@ extension SearchResultsViewController: BreadcrumbPathControlDelegate {
 
     @objc private func breadcrumbOpenInTerminal(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
+        guard !pathBar.isOfflinePathMode, !isPathOffline(url.path) else {
+            showBlockedActionFeedback()
+            return
+        }
         delegate?.searchResultsDidConsumeResult()
         openInTerminalHandler([url])
     }
@@ -1944,6 +3689,10 @@ extension SearchResultsViewController: BreadcrumbPathControlDelegate {
 
     @objc private func breadcrumbShowInfo(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
+        guard !pathBar.isOfflinePathMode, !isPathOffline(url.path) else {
+            showBlockedActionFeedback()
+            return
+        }
         openFinderInfoWindow(for: [url.path])
     }
 }
@@ -2044,6 +3793,11 @@ final class SearchTableView: NSTableView {
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // 焦点位于文本编辑器（如搜索输入框）时，将 ⌘⌫ 交还给文本编辑器的整行删除语义，防止误将预选首行移入废纸篓
+        if event.keyCode == 51 && event.modifierFlags.contains(.command),
+           window?.firstResponder is NSTextView {
+            return false
+        }
         if let menu = self.menu, menu.performKeyEquivalent(with: event) {
             return true
         }
@@ -2136,6 +3890,7 @@ class SearchHighlightCellView: NSTableCellView {
 
     override var backgroundStyle: NSView.BackgroundStyle {
         didSet {
+            guard oldValue != backgroundStyle else { return }
             renderText()
         }
     }
@@ -2155,6 +3910,7 @@ class SearchHighlightCellView: NSTableCellView {
     /// 后端下发的是 UTF-8 字节偏移，需夹取后映射为 NSRange。
     private static func nsRanges(in string: String,
                                  byteRanges: [(start: Int, end: Int)]) -> [NSRange] {
+        guard !byteRanges.isEmpty else { return [] }
         let utf8 = string.utf8
         return byteRanges.compactMap { range in
             guard range.start < range.end,
@@ -2174,8 +3930,17 @@ class SearchHighlightCellView: NSTableCellView {
         }
 
         let isSelected = backgroundStyle == .emphasized
-        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let defaultColor: NSColor = isSelected ? NSColor.white.withAlphaComponent(selectedAlpha) : baseColor
+
+        // 无高亮区间时走纯文本快路径：NSTextField 原生保留自身的 lineBreakMode，无需逐行分配 NSMutableAttributedString
+        if displayRanges.isEmpty {
+            textField?.font = regularFont
+            textField?.textColor = defaultColor
+            textField?.stringValue = displayString
+            return
+        }
+
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let highlightColor: NSColor = isSelected ? .white : (isDark ? .controlAccentColor : .labelColor)
 
         var baseAttributes: [NSAttributedString.Key: Any] = [
@@ -2204,6 +3969,9 @@ final class SearchNameTableCellView: SearchHighlightCellView {
     /// 选中态下普通字符用微透明白保持层级，命中字符用纯白加粗突出。
     override var selectedAlpha: CGFloat { 0.82 }
 
+    /// 当前单元格绑定的文件路径，供异步应用包图标加载完成后校验是否已被复用
+    var representedPath: String?
+
     private(set) var iconWidthConstraint: NSLayoutConstraint?
     private(set) var iconHeightConstraint: NSLayoutConstraint?
 
@@ -2217,8 +3985,11 @@ final class SearchNameTableCellView: SearchHighlightCellView {
         iconHeightConstraint?.constant = size
     }
 
-    func configure(name: String, matchPositions: [FfiMatchRange]) {
+    func configure(name: String, matchPositions: [FfiMatchRange], isOffline: Bool = false) {
         setDisplay(name, ranges: matchPositions.map { (Int($0.start), Int($0.end)) })
+        let alpha: CGFloat = isOffline ? 0.55 : 1.0
+        imageView?.alphaValue = alpha
+        textField?.alphaValue = alpha
         toolTip = name
         textField?.toolTip = name
     }
@@ -2241,18 +4012,24 @@ final class SearchPathTableCellView: SearchHighlightCellView {
         Self.middleTruncateStyle
     }
 
-    func configure(fullPath: String, parentMatchPositions: [FfiMatchRange]) {
+    func configure(fullPath: String, parentMatchPositions: [FfiMatchRange], isOffline: Bool = false) {
         let parent = (fullPath as NSString).deletingLastPathComponent
         guard !parent.isEmpty else {
-            setDisplay("", ranges: [])
-            toolTip = nil
-            textField?.toolTip = nil
+            let fallback = isOffline ? L("search.result.offline") : ""
+            setDisplay(fallback, ranges: [])
+            textField?.alphaValue = isOffline ? 0.55 : 1.0
+            toolTip = fallback.isEmpty ? nil : fullPath
+            textField?.toolTip = fallback.isEmpty ? nil : fullPath
             return
         }
 
         let abbreviated = abbreviateHomePrefix(parent)
-        setDisplay(abbreviated.display,
+        let display = isOffline
+            ? "\(abbreviated.display) · \(L("search.result.offline"))"
+            : abbreviated.display
+        setDisplay(display,
                    ranges: parentMatchPositions.compactMap { abbreviated.displayRange(for: $0) })
+        textField?.alphaValue = isOffline ? 0.55 : 1.0
         toolTip = fullPath
         textField?.toolTip = fullPath
     }
@@ -2265,4 +4042,6 @@ extension NSUserInterfaceItemIdentifier {
     static let columnPath = NSUserInterfaceItemIdentifier("Path")
     static let columnSize = NSUserInterfaceItemIdentifier("Size")
     static let columnModified = NSUserInterfaceItemIdentifier("DateModified")
+    static let columnCreated = NSUserInterfaceItemIdentifier("DateCreated")
+    static let columnExtension = NSUserInterfaceItemIdentifier("Extension")
 }

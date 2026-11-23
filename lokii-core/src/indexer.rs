@@ -94,7 +94,13 @@ pub fn score_match_zero_alloc(
     }
 
     if case_sensitive {
-        if let Some(score) = score_match(name, keywords) {
+        let matched = if name.is_ascii() {
+            score_match(name, keywords)
+        } else {
+            let normalized = crate::cjk::normalize_and_simplify_cow(name);
+            score_match(normalized.as_ref(), keywords)
+        };
+        if let Some(score) = matched {
             return Some(score);
         }
 
@@ -103,11 +109,14 @@ pub fn score_match_zero_alloc(
             return None;
         }
 
-        // Auto 敏感模式下，若存在非 ASCII 字符且关键词全为 ASCII，允许拼音匹配但降权为 Substring
-        if all_keywords_ascii && name.as_bytes().iter().any(|&b| b >= 0x80) {
-            if crate::pinyin::score_pinyin_match(name, keywords).is_some() {
-                return Some(MatchScore::Substring);
-            }
+        // Auto 敏感模式下，若名字含非 ASCII 字符且查询包含 ASCII 字母，允许拼音（含汉字+拼音混合）匹配但降权为 Substring
+        if !name.is_ascii()
+            && keywords
+                .iter()
+                .any(|k| k.bytes().any(|b| b.is_ascii_alphabetic()))
+            && crate::pinyin::score_pinyin_match(name, keywords).is_some()
+        {
+            return Some(MatchScore::Substring);
         }
         return None;
     }
@@ -116,7 +125,10 @@ pub fn score_match_zero_alloc(
         if let Some(score) = score_match(folded, keywords) {
             return Some(score);
         }
-        if all_keywords_ascii {
+        if keywords
+            .iter()
+            .any(|k| k.bytes().any(|b| b.is_ascii_alphabetic()))
+        {
             if let Some(pinyin_score) = crate::pinyin::score_pinyin_match(name, keywords) {
                 return Some(pinyin_score);
             }
@@ -126,11 +138,19 @@ pub fn score_match_zero_alloc(
     if !all_keywords_ascii {
         // `folded_non_ascii` 只在“折叠后与原名不同”时存在；这里为 None
         // 意味着名字已经是小写等价形式（CJK、小写重音字母等），直接按原名比较。
-        return if name.is_ascii() {
-            None
-        } else {
-            score_match(name, keywords)
-        };
+        if name.is_ascii() {
+            return None;
+        }
+        if let Some(score) = score_match(name, keywords) {
+            return Some(score);
+        }
+        if keywords
+            .iter()
+            .any(|k| k.bytes().any(|b| b.is_ascii_alphabetic()))
+        {
+            return crate::pinyin::score_pinyin_match(name, keywords);
+        }
+        return None;
     }
     let name_bytes = name.as_bytes();
     let mut all_match = true;
@@ -210,6 +230,13 @@ impl IndexStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn try_write(
+        &self,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, crate::compact_index::CompactIndex>> {
+        self.entries.try_write()
+    }
+
+    #[cfg(test)]
     pub fn entries(&self) -> Vec<FileEntry> {
         self.read()
             .iter()
@@ -224,9 +251,7 @@ impl IndexStore {
     }
 
     pub fn remove_paths(&self, paths: &HashSet<String>) {
-        self.entries
-            .write()
-            .remove_matching(|view| paths.iter().any(|path| view.path_equals(path)));
+        self.entries.write().remove_exact_paths(paths);
     }
 
     /// 批量从紧凑倒排索引中立即剔除指定排除目录树（含自身及所有子条目），并就地重整查询索引
@@ -247,8 +272,13 @@ impl IndexStore {
         let extension = (!crate::search::filter::is_dotfile_query(query)
             && query.starts_with('.')
             && !query.contains(' '))
-        .then(|| query[1..].to_lowercase());
-        let keywords: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        .then(|| crate::cjk::fold_str(&query[1..]));
+        let keywords: Vec<String> = query.split_whitespace().map(crate::cjk::fold_str).collect();
+        let raw_keywords: Vec<String> = query
+            .split_whitespace()
+            .map(|s| crate::cjk::normalize_nfc_cow(s).into_owned())
+            .collect();
+        let rank_ctx = crate::search::ranking::RecordRankContext::default();
         let matches = match &extension {
             Some(extension) => {
                 let req = if extension.is_empty() {
@@ -261,7 +291,9 @@ impl IndexStore {
                 };
                 let ext_ascii = extension.is_ascii();
                 let mut top = crate::search::top_k::TopK::new(max_results);
+                let query_index = read.query_index();
                 let sorted = read.sorted_names();
+                let records = read.records();
                 for &name_id in &sorted.ids {
                     if !extension.is_empty() {
                         if let Some(sig) = read.name_signature(name_id) {
@@ -269,6 +301,10 @@ impl IndexStore {
                                 continue;
                             }
                         }
+                    }
+                    let entries = read.entries_for_name(name_id);
+                    if entries.is_empty() {
+                        continue;
                     }
                     let Some((name, folded)) = read.name_entry(name_id) else {
                         continue;
@@ -283,14 +319,30 @@ impl IndexStore {
                         name.rsplit('.').next() == Some(extension.as_str())
                     };
                     if matched {
-                        for &ordinal in read.entries_for_name(name_id).iter().take(max_results) {
-                            top.offer(ordinal as usize, MatchScore::Exact, name);
-                            if top.is_full() {
-                                break;
+                        let base = crate::search::ranking::BaseNameScore::for_exact_fast_path(name);
+                        let upper = base.upper_bound(&rank_ctx, true, false);
+                        if let Some(worst) = top.worst() {
+                            if upper < worst.score || (upper == worst.score && name > worst.name()) {
+                                continue;
                             }
                         }
-                        if top.is_full() {
-                            break;
+                        let (head, tail) = crate::search::ranking::bucket_slices(entries);
+                        for &ordinal in head.iter().chain(tail.iter()) {
+                            let Some(record) = records.get(ordinal as usize) else {
+                                continue;
+                            };
+                            let (parent_depth, parent_hidden) =
+                                read.record_parent_meta(record, query_index);
+                            let score = crate::search::ranking::score_record_with_meta(
+                                base,
+                                record.is_dir,
+                                parent_depth,
+                                parent_hidden,
+                                &rank_ctx,
+                                false,
+                                0,
+                            );
+                            top.offer(ordinal as usize, score, name);
                         }
                     }
                 }
@@ -302,10 +354,28 @@ impl IndexStore {
                     req = req.union(crate::string_pool::NameSignature::from_substring_query(kw));
                 }
                 let all_ascii = keywords.iter().all(|k| k.is_ascii());
+                let targets_hidden =
+                    crate::search::ranking::keywords_target_hidden(false, &keywords);
                 let filter = crate::search::CompiledRecordFilter::default();
-                crate::search::rank_unique_names(&read, &filter, max_results, req, |name, folded| {
-                    score_match_zero_alloc(name, folded, &keywords, all_ascii, false, false)
-                })
+                crate::search::rank_unique_names(
+                    &read,
+                    &filter,
+                    max_results,
+                    req,
+                    targets_hidden,
+                    &rank_ctx,
+                    |name, folded| {
+                        crate::search::ranking::score_name_rank(
+                            name,
+                            folded,
+                            &keywords,
+                            &raw_keywords,
+                            all_ascii,
+                            false,
+                            false,
+                        )
+                    },
+                )
             }
         };
         matches
@@ -314,7 +384,7 @@ impl IndexStore {
                 entry: read
                     .materialize(crate::compact_index::EntryId(candidate.ordinal))
                     .unwrap(),
-                score: candidate.score,
+                score: candidate.score.to_match_score(),
             })
             .collect()
     }

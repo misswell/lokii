@@ -6,8 +6,15 @@ use notify::{Config as NotifyConfig, Event, RecommendedWatcher, RecursiveMode, W
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+/// 「索引应用程序」开关追加的索引根（存在才加入）。
+const APP_INDEX_ROOTS: [&str; 3] = [
+    "/Applications",
+    "/System/Applications",
+    "/System/Cryptexes/App/System/Applications",
+];
+
 /// General application settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralConfig {
     /// UI language: "zh-Hans" (default) or "en".
@@ -17,6 +24,8 @@ pub struct GeneralConfig {
     /// Preferred terminal application bundle identifier (e.g. "com.googlecode.iterm2")
     /// or absolute application bundle path. Defaults to "com.apple.Terminal".
     pub terminal_bundle_id: String,
+    /// 搜索框为空且未激活任何过滤条件时，隐藏默认文件列表并展示轻量搜索语法引导。
+    pub hide_results_when_empty: bool,
 }
 
 impl Default for GeneralConfig {
@@ -25,22 +34,29 @@ impl Default for GeneralConfig {
             language: "zh-Hans".to_string(),
             show_in_dock: true,
             terminal_bundle_id: "com.apple.Terminal".to_string(),
+            hide_results_when_empty: true,
         }
     }
 }
 
 /// Index-related configuration: which directories to scan, what to exclude.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IndexConfig {
     /// Directories to index (supports "~" for home directory).
     pub index_paths: Vec<String>,
+    /// 是否索引应用程序目录（/Applications 与系统应用目录），应用包内部不递归。
+    pub index_apps: bool,
     /// Directory names to exclude from traversal (component-level match).
     pub exclude: Vec<String>,
     /// Path prefixes to exclude (supports "~", checked by prefix match).
     pub exclude_paths: Vec<String>,
     /// Whether to include hidden files/directories (starting with ".").
     pub include_hidden: bool,
+    /// 是否排除凭据目录与文件（.ssh、.gnupg、.aws 等）；仅对隐藏文件生效，显式加入索引根可穿透。
+    pub exclude_sensitive: bool,
+    /// `exclude_sensitive` 生效时排除的名字列表（目录或文件名，大小写无关）。
+    pub sensitive_names: Vec<String>,
     /// Maximum number of search results to return.
     pub max_results: usize,
     /// 非本地卷（网络共享等）上的索引根每隔多少分钟整棵重扫一次；FSEvents 看不到远端改动。0 表示不重扫。
@@ -51,6 +67,7 @@ impl Default for IndexConfig {
     fn default() -> Self {
         Self {
             index_paths: vec!["~".to_string()],
+            index_apps: false,
             exclude: vec![
                 "node_modules".to_string(),
                 ".git".to_string(),
@@ -116,14 +133,29 @@ impl Default for IndexConfig {
                 "~/.docker".to_string(),
             ],
             include_hidden: false,
+            exclude_sensitive: true,
+            sensitive_names: vec![
+                ".ssh".to_string(),
+                ".gnupg".to_string(),
+                ".aws".to_string(),
+                ".kube".to_string(),
+                ".docker".to_string(),
+                ".password-store".to_string(),
+                ".netrc".to_string(),
+                ".git-credentials".to_string(),
+                ".npmrc".to_string(),
+                ".pypirc".to_string(),
+                ".authinfo".to_string(),
+                ".msmtprc".to_string(),
+            ],
             max_results: 500,
-            network_rescan_minutes: 5,
+            network_rescan_minutes: 30,
         }
     }
 }
 
 /// Window behavior configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
     /// Whether to auto-hide the window when it loses focus.
@@ -144,7 +176,7 @@ impl Default for WindowConfig {
 /// Global shortcut configuration.
 /// NOTE: Deprecated — shortcut is now managed by KeyboardShortcuts (UserDefaults).
 /// Retained for TOML backward compatibility only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutConfig {
     /// Global keyboard shortcut to toggle the search window.
@@ -164,7 +196,7 @@ impl Default for ShortcutConfig {
 ///
 /// Organized into TOML sections: [general], [index], [window], [shortcut].
 /// Supports partial TOML deserialization -- missing sections use defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     #[serde(default)]
@@ -188,50 +220,82 @@ impl Default for AppConfig {
     }
 }
 
+/// Expands leading `~` or `~/...` to the user's home directory.
+/// If `dirs::home_dir()` returns None, falls back to `/`.
+pub(crate) fn expand_tilde(raw: &str) -> PathBuf {
+    if raw == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(rest)
+    } else {
+        PathBuf::from(raw)
+    }
+}
+
 impl AppConfig {
     /// Resolve index paths, expanding "~" to the user's home directory.
     /// Silently skips paths that don't exist on disk.
     pub fn resolve_paths(&self) -> Vec<PathBuf> {
-        let home = dirs::home_dir();
-        self.index
+        let mut paths: Vec<PathBuf> = self
+            .index
             .index_paths
             .iter()
             .filter_map(|p| {
-                let resolved = if p == "~" {
-                    home.clone().unwrap_or_else(|| PathBuf::from("/"))
-                } else if let Some(rest) = p.strip_prefix("~/") {
-                    home.clone()
-                        .unwrap_or_else(|| PathBuf::from("/"))
-                        .join(rest)
-                } else {
-                    PathBuf::from(p)
-                };
+                let resolved = expand_tilde(p);
                 if resolved.exists() {
                     Some(resolved)
                 } else {
                     None
                 }
             })
-            .collect()
+            .collect();
+        // 应用开关追加的根不写回用户配置，关闭后自然消失
+        for path in self.resolve_app_roots() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
+    /// 纯词法展开索引根目录，仅执行 `~` 替换与去重，绝不触发任何磁盘 `stat` / `exists()` 系统调用。
+    /// 供检索热路径（如空结果排除原因推断）调用，避免失联网络卷或休眠外置盘阻塞搜索线程。
+    pub fn resolve_paths_lexical(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::with_capacity(self.index.index_paths.len());
+        for p in &self.index.index_paths {
+            let resolved = expand_tilde(p);
+            if !paths.contains(&resolved) {
+                paths.push(resolved);
+            }
+        }
+        if self.index.index_apps {
+            for root in APP_INDEX_ROOTS {
+                let path = PathBuf::from(root);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths
+    }
+
+    pub(crate) fn resolve_app_roots(&self) -> impl Iterator<Item = PathBuf> {
+        let enabled = self.index.index_apps;
+        APP_INDEX_ROOTS
+            .into_iter()
+            .filter(move |_| enabled)
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
     }
 
     /// Resolve exclude paths, expanding "~" to the user's home directory.
     pub fn resolve_exclude_paths(&self) -> Vec<PathBuf> {
-        let home = dirs::home_dir();
         self.index
             .exclude_paths
             .iter()
-            .map(|p| {
-                if p == "~" {
-                    home.clone().unwrap_or_else(|| PathBuf::from("/"))
-                } else if let Some(rest) = p.strip_prefix("~/") {
-                    home.clone()
-                        .unwrap_or_else(|| PathBuf::from("/"))
-                        .join(rest)
-                } else {
-                    PathBuf::from(p)
-                }
-            })
+            .map(|p| expand_tilde(p))
             .collect()
     }
 
@@ -266,9 +330,15 @@ language = "zh-Hans"
 # 是否在程序坞中显示图标
 show_in_dock = true
 
+# 未输入搜索词时是否隐藏默认文件列表
+hide_results_when_empty = true
+
 [index]
 # 索引目录列表（支持 ~ 表示用户主目录）
 index_paths = ["~"]
+
+# 是否索引应用程序目录（/Applications 与系统应用目录），应用包内部不递归
+index_apps = false
 
 # 排除的目录名（不会索引这些目录及其子目录）
 exclude = ["node_modules", ".git", ".DS_Store", "target", ".Trash", ".hg", ".svn", "build", "dist", ".next", ".nuxt", ".cache", ".venv", "venv", "__pycache__", "DerivedData", "Pods", "Carthage", "Contents", "logs", "tmp", "temp", "coverage", ".idea", ".vscode", "vendor", "out", "bin", "obj", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", "xcshareddata", "xcuserdata"]
@@ -279,11 +349,17 @@ exclude_paths = ["/System", "/Library", "/private", "/bin", "/sbin", "/usr", "/d
 # 是否索引隐藏文件和目录（以 . 开头的）
 include_hidden = false
 
+# 索引隐藏文件时是否仍排除 .ssh、.gnupg、.aws 等凭据目录
+exclude_sensitive = true
+
+# 受保护的名字：exclude_sensitive 打开时，这些目录/文件即使索引隐藏文件也不收录
+sensitive_names = [".ssh", ".gnupg", ".aws", ".kube", ".docker", ".password-store", ".netrc", ".git-credentials", ".npmrc", ".pypirc", ".authinfo", ".msmtprc"]
+
 # 搜索结果最大返回数量
 max_results = 500
 
 # 网络共享等非本地卷上的索引目录，每隔多少分钟整体重扫一次（0 表示不重扫）
-network_rescan_minutes = 5
+network_rescan_minutes = 30
 
 [window]
 # 窗口失去焦点时是否自动隐藏
@@ -330,14 +406,18 @@ impl ConfigStore {
 /// Load config from disk or create default config.toml on first run.
 ///
 /// Returns the parsed config and an optional error message (for invalid/unreadable files).
-/// On error, returns AppConfig::default() so the app always starts.
+/// On parse error, backs up the corrupted file to `config.toml.bak` before returning
+/// `AppConfig::default()` so subsequent UI preference saves never wipe user edits silently.
 pub fn load_or_create_config() -> (AppConfig, Option<String>) {
-    let config_dir = AppConfig::config_dir();
+    load_or_create_config_in(&AppConfig::config_dir())
+}
+
+pub(crate) fn load_or_create_config_in(config_dir: &std::path::Path) -> (AppConfig, Option<String>) {
     let config_path = config_dir.join("config.toml");
 
     if !config_path.exists() {
         // First run: create default config (per D-03, CFG-06)
-        let _ = std::fs::create_dir_all(&config_dir);
+        let _ = std::fs::create_dir_all(config_dir);
         let _ = std::fs::write(&config_path, DEFAULT_CONFIG_TOML);
         return (AppConfig::default(), None);
     }
@@ -346,8 +426,18 @@ pub fn load_or_create_config() -> (AppConfig, Option<String>) {
         Ok(content) => match AppConfig::from_toml(&content) {
             Ok(config) => (config, None),
             Err(e) => {
-                // Invalid config -> return defaults + error message
-                let msg = format!("Config parse error in {}: {}", config_path.display(), e);
+                // 解析失败时自动备份原始损坏文件为 config.toml.bak，防止后续设置保存覆盖导致用户配置永久丢失
+                let backup_path = config_dir.join("config.toml.bak");
+                let backup_note = match std::fs::copy(&config_path, &backup_path) {
+                    Ok(_) => format!(" (backed up to {})", backup_path.display()),
+                    Err(_) => String::new(),
+                };
+                let msg = format!(
+                    "Config parse error in {}: {}{}",
+                    config_path.display(),
+                    e,
+                    backup_note
+                );
                 (AppConfig::default(), Some(msg))
             }
         },
@@ -403,6 +493,11 @@ where
                     match std::fs::read_to_string(&config_path) {
                         Ok(content) => match AppConfig::from_toml(&content) {
                             Ok(new_config) => {
+                                // 若磁盘内容与内存 config_store 完全一致（典型于前端自身写盘触发的文件事件），
+                                // 直接跳过重复回调，消除无意义的卷协调器对账与 UI 重载。
+                                if *config_store.read() == new_config {
+                                    continue;
+                                }
                                 config_store.update(new_config.clone());
                                 on_reload(&new_config);
                             }
@@ -532,15 +627,27 @@ toggle_window = "Cmd+Alt+F"
     #[test]
     fn test_index_config_defaults() {
         let config = IndexConfig::default();
-        assert_eq!(config.index_paths, vec!["~"]);
+        assert_eq!(config.index_paths, vec!["~".to_string()]);
+        assert!(!config.index_apps);
+        assert!(config.exclude.contains(&"Contents".to_string()));
         assert!(config.exclude.contains(&"node_modules".to_string()));
         assert!(config.exclude.contains(&".git".to_string()));
         assert!(config.exclude.contains(&".DS_Store".to_string()));
+        assert!(!config.exclude.contains(&".nox".to_string()));
         assert!(config.exclude.contains(&"target".to_string()));
         assert!(config.exclude.contains(&".Trash".to_string()));
         assert!(config.exclude_paths.contains(&"~/Library".to_string()));
         assert!(!config.include_hidden);
+        assert!(config.exclude_sensitive);
+        assert!(config.sensitive_names.contains(&".ssh".to_string()));
         assert_eq!(config.max_results, 500);
+
+        let parsed_default = AppConfig::from_toml(DEFAULT_CONFIG_TOML).expect("DEFAULT_CONFIG_TOML valid");
+        assert!(!parsed_default.index.include_hidden);
+        assert!(!parsed_default.index.index_apps);
+        assert!(parsed_default.index.exclude.contains(&".DS_Store".to_string()));
+        assert!(parsed_default.index.sensitive_names.contains(&".ssh".to_string()));
+        assert!(!parsed_default.index.exclude.contains(&".nox".to_string()));
     }
 
     #[test]
@@ -657,6 +764,7 @@ max_results = 200
         assert!(DEFAULT_CONFIG_TOML.contains("show_in_dock = true"));
         assert!(DEFAULT_CONFIG_TOML.contains("Cmd+Shift+Space"));
         assert!(DEFAULT_CONFIG_TOML.contains(r#"index_paths = ["~"]"#));
+        assert!(DEFAULT_CONFIG_TOML.contains("index_apps = false"));
         assert!(DEFAULT_CONFIG_TOML.contains("hide_on_blur = true"));
         assert!(DEFAULT_CONFIG_TOML.contains("remember_position = false"));
         assert!(DEFAULT_CONFIG_TOML.contains("max_results = 500"));
@@ -679,6 +787,29 @@ max_results = 200
         assert_eq!(paths[0], home);
         assert_eq!(paths[1], home.join("Documents"));
         assert_eq!(paths[2], PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn test_resolve_paths_lexical_keeps_nonexistent_and_app_roots_without_stat() {
+        let mut config = AppConfig::default();
+        config.index.index_apps = true;
+        config.index.index_paths = vec![
+            "~".to_string(),
+            "/Volumes/DefinitelyOfflineNAS_Test_NoStat/Share".to_string(),
+            "/Volumes/DefinitelyOfflineNAS_Test_NoStat/Share".to_string(),
+        ];
+
+        let lexical = config.resolve_paths_lexical();
+        let home = dirs::home_dir().expect("home dir should exist");
+        assert!(lexical.contains(&home));
+        let offline = PathBuf::from("/Volumes/DefinitelyOfflineNAS_Test_NoStat/Share");
+        assert_eq!(
+            lexical.iter().filter(|p| *p == &offline).count(),
+            1,
+            "lexical resolution must retain nonexistent paths and deduplicate them"
+        );
+        assert!(lexical.contains(&PathBuf::from("/Applications")));
+        assert!(lexical.contains(&PathBuf::from("/System/Applications")));
     }
 
     #[test]
@@ -711,12 +842,12 @@ max_results = 200
         let mut config = AppConfig::default();
         config.general.show_in_dock = false;
         config.index.max_results = 1000;
-        config.index.include_hidden = true;
+        config.index.include_hidden = false;
         config.window.hide_on_blur = false;
         let json = serde_json::to_string(&config).expect("serialize");
         let restored: AppConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.index.max_results, 1000);
-        assert!(restored.index.include_hidden);
+        assert!(!restored.index.include_hidden);
         assert!(!restored.window.hide_on_blur);
         assert!(!restored.general.show_in_dock);
     }
@@ -737,5 +868,51 @@ max_results = 200
         // If there's no config file issue, error should be None
         // (but we can't guarantee this in CI, so just check it doesn't panic)
         let _ = error;
+    }
+
+    #[test]
+    fn test_load_or_create_config_in_backs_up_corrupted_toml() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let corrupted = "invalid {{{{ toml content\n[index]\nmax_results = \"bad\"\n";
+        fs::write(&config_path, corrupted).unwrap();
+
+        let (config, error) = load_or_create_config_in(tmp.path());
+        assert_eq!(config, AppConfig::default());
+        let msg = error.expect("corrupted config must surface an error message");
+        assert!(
+            msg.contains("config.toml.bak"),
+            "error message should mention backup path, got: {msg}"
+        );
+        let backup_path = tmp.path().join("config.toml.bak");
+        assert!(backup_path.exists(), "corrupted config.toml must be backed up");
+        assert_eq!(fs::read_to_string(&backup_path).unwrap(), corrupted);
+    }
+
+    #[test]
+    fn hide_results_when_empty_defaults_true_and_roundtrips() {
+        let default = AppConfig::default();
+        assert!(default.general.hide_results_when_empty);
+        assert!(DEFAULT_CONFIG_TOML.contains("hide_results_when_empty = true"));
+
+        let legacy_toml = r#"
+[general]
+language = "zh-Hans"
+show_in_dock = true
+"#;
+        let legacy = AppConfig::from_toml(legacy_toml).expect("legacy toml must parse");
+        assert!(legacy.general.hide_results_when_empty);
+
+        let disabled_toml = r#"
+[general]
+language = "en"
+hide_results_when_empty = false
+"#;
+        let disabled = AppConfig::from_toml(disabled_toml).expect("disabled toml must parse");
+        assert!(!disabled.general.hide_results_when_empty);
+
+        let json = serde_json::to_string(&disabled).expect("serialize");
+        let roundtrip: AppConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(!roundtrip.general.hide_results_when_empty);
     }
 }

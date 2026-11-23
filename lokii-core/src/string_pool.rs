@@ -23,7 +23,15 @@ pub(crate) struct NameSignature {
 impl NameSignature {
     #[inline]
     pub fn from_name(name: &str, folded_non_ascii: Option<&str>) -> Self {
-        let target = folded_non_ascii.unwrap_or(name);
+        let folded_cow;
+        let target = match folded_non_ascii {
+            Some(folded) => folded,
+            None if name.is_ascii() => name,
+            None => {
+                folded_cow = crate::cjk::fold_cow(name);
+                folded_cow.as_ref()
+            }
+        };
         let bytes = target.as_bytes();
         let mut lo = 0u64;
         let mut hi = 0u64;
@@ -80,34 +88,8 @@ impl NameSignature {
 
         if (lo & (1u64 << 51)) != 0 {
             for ch in target.chars() {
-                let u = ch as u32;
-                if (0x4E00..=0x9FFF).contains(&u) || (0x3400..=0x4DBF).contains(&u) {
-                    lo |= 1u64 << 52;
-                    if let Some((syllable, initial)) = crate::pinyin::char_pinyin(ch) {
-                        for b in syllable.bytes() {
-                            if b.is_ascii_lowercase() {
-                                lo |= 1u64 << (b - b'a');
-                            }
-                        }
-                        if initial.is_ascii_lowercase() {
-                            let bit = (initial as u8 - b'a') as u32;
-                            lo |= 1u64 << bit;
-                            hi |= 1u64 << bit;
-                        }
-                    }
-                } else if (0x3040..=0x30FF).contains(&u) {
-                    lo |= 1u64 << 53;
-                } else if (0xAC00..=0xD7AF).contains(&u) {
-                    lo |= 1u64 << 54;
-                } else if u >= 0x80 {
-                    // 将带重音/变音符的拉丁扩展字符折叠映射至对应的 ASCII 基础字母/数字签名位，
-                    // 确保模糊匹配器的智能变音归一化（如 cafe 命中 café.txt、naive 命中 naïve.md）不被签名预筛误剪枝。
-                    let norm = nucleo_matcher::chars::normalize(ch);
-                    if norm.is_ascii() {
-                        if let Some(bit) = ascii_alnum_bit(norm as u8) {
-                            lo |= 1u64 << bit;
-                        }
-                    }
+                if !ch.is_ascii() {
+                    apply_non_ascii_signature_bits(ch, true, &mut lo, &mut hi);
                 }
             }
         }
@@ -123,48 +105,30 @@ impl NameSignature {
     /// 因此这里只要求字符出现位，不要求符号位、相邻二元组与词首位。
     #[inline]
     pub fn from_fuzzy_query(query: &str) -> Self {
+        let norm = crate::cjk::normalize_and_simplify_cow(query);
         let mut lo = 0u64;
-        for ch in query.chars() {
+        let mut unused_hi = 0u64;
+        for ch in norm.chars() {
             if ch.is_ascii() {
                 if let Some(bit) = ascii_alnum_bit(ch as u8) {
                     lo |= 1u64 << bit;
                 }
-                continue;
-            }
-            let u = ch as u32;
-            if (0x4E00..=0x9FFF).contains(&u) || (0x3400..=0x4DBF).contains(&u) {
-                lo |= 1u64 << 52;
-                // 命中的文件名必然包含该汉字，其签名也必然携带同一组拼音字母位
-                if let Some((syllable, _)) = crate::pinyin::char_pinyin(ch) {
-                    for b in syllable.bytes() {
-                        if let Some(bit) = ascii_alnum_bit(b) {
-                            lo |= 1u64 << bit;
-                        }
-                    }
-                }
-            } else if (0x3040..=0x30FF).contains(&u) {
-                lo |= 1u64 << 53;
-            } else if (0xAC00..=0xD7AF).contains(&u) {
-                lo |= 1u64 << 54;
             } else {
-                // 变音字符经归一化后仍是同一基础字母，签名位口径与 from_name 保持一致
-                let norm = nucleo_matcher::chars::normalize(ch);
-                if norm.is_ascii() {
-                    if let Some(bit) = ascii_alnum_bit(norm as u8) {
-                        lo |= 1u64 << bit;
-                    }
-                }
+                apply_non_ascii_signature_bits(ch, false, &mut lo, &mut unused_hi);
             }
         }
         Self { lo, hi: 0 }
     }
 
-    /// 根据已经转小写的查询子串片段生成必需签名位（超集过滤掩码）。
+    /// 根据查询子串片段生成必需签名位（超集过滤掩码）。
     ///
-    /// 任何包含 `needle_lower` 的文件名，其 `NameSignature` 必然包含返回掩码中的所有 1 位。
+    /// 非 ASCII 查询先做 NFC 合成与折叠再构建签名，保证与索引端 NFD/NFC 归一化口径保持一致。
+    /// 任何包含 `needle` 的文件名，其 `NameSignature` 必然包含返回掩码中的所有 1 位。
     #[inline]
     pub fn from_substring_query(needle_lower: &str) -> Self {
-        let bytes = needle_lower.as_bytes();
+        let folded_cow = crate::cjk::fold_cow(needle_lower);
+        let target = folded_cow.as_ref();
+        let bytes = target.as_bytes();
         let mut lo = 0u64;
         let mut hi = 0u64;
         let mut prev_folded: u8 = 0;
@@ -206,26 +170,9 @@ impl NameSignature {
         }
 
         if (lo & (1u64 << 51)) != 0 {
-            for ch in needle_lower.chars() {
-                let u = ch as u32;
-                if (0x4E00..=0x9FFF).contains(&u) || (0x3400..=0x4DBF).contains(&u) {
-                    lo |= 1u64 << 52;
-                    if let Some((syllable, initial)) = crate::pinyin::char_pinyin(ch) {
-                        for b in syllable.bytes() {
-                            if b.is_ascii_lowercase() {
-                                lo |= 1u64 << (b - b'a');
-                            }
-                        }
-                        if initial.is_ascii_lowercase() {
-                            let bit = (initial as u8 - b'a') as u32;
-                            lo |= 1u64 << bit;
-                            hi |= 1u64 << bit;
-                        }
-                    }
-                } else if (0x3040..=0x30FF).contains(&u) {
-                    lo |= 1u64 << 53;
-                } else if (0xAC00..=0xD7AF).contains(&u) {
-                    lo |= 1u64 << 54;
+            for ch in target.chars() {
+                if !ch.is_ascii() {
+                    apply_non_ascii_signature_bits(ch, true, &mut lo, &mut hi);
                 }
             }
         }
@@ -260,6 +207,54 @@ impl NameSignature {
             }
         }
         false
+    }
+}
+
+/// 为非 ASCII 字符设置统一的签名位，保证建库端与各检索模式查询端保持同一脚本与变音映射口径。
+#[inline]
+fn apply_non_ascii_signature_bits(
+    ch: char,
+    include_cjk_initial_hi: bool,
+    lo: &mut u64,
+    hi: &mut u64,
+) {
+    let u = ch as u32;
+    if (0x4E00..=0x9FFF).contains(&u) || (0x3400..=0x4DBF).contains(&u) {
+        *lo |= 1u64 << 52;
+        // 遍历繁简归一化后的全部合法读音变体，补充多音字字母位、边界首字母及精确 ü(v)/u 签名位；
+        // 严禁在 ASCII 字节路径交叉置 u/v，避免影响纯英文词项的预筛精度。
+        for &syllable in crate::pinyin::char_pinyin_variants(ch) {
+            for b in syllable.bytes() {
+                if b.is_ascii_lowercase() {
+                    *lo |= 1u64 << (b - b'a');
+                }
+            }
+            if let Some(&first) = syllable.as_bytes().first() {
+                if first.is_ascii_lowercase() {
+                    let bit = (first - b'a') as u32;
+                    *lo |= 1u64 << bit;
+                    if include_cjk_initial_hi {
+                        *hi |= 1u64 << bit;
+                    }
+                }
+            }
+            if crate::pinyin::is_v_u_syllable(syllable) {
+                *lo |= 1u64 << (b'v' - b'a');
+            }
+        }
+    } else if (0x3040..=0x30FF).contains(&u) {
+        *lo |= 1u64 << 53;
+    } else if (0xAC00..=0xD7AF).contains(&u) || (0x1100..=0x11FF).contains(&u) {
+        *lo |= 1u64 << 54;
+    } else if u >= 0x80 {
+        // 将带重音/变音符的拉丁扩展字符折叠映射至对应的 ASCII 基础字母/数字单字 lo 位，
+        // 严禁写入 hi 或二元组位，确保模糊去重音检索与 NFC/NFD 归一化检索均满足超集不变式。
+        let norm = nucleo_matcher::chars::normalize(ch);
+        if norm.is_ascii() {
+            if let Some(bit) = ascii_alnum_bit(norm as u8) {
+                *lo |= 1u64 << bit;
+            }
+        }
     }
 }
 
@@ -308,6 +303,61 @@ fn bigram_bucket(c0: u8, c1: u8) -> u32 {
     (h >> 24) % 46
 }
 
+/// 64 位无二次哈希直通 Hasher：用于 `StringPool::lookup`（键本身已是经充分雪崩混洗的 `u64` 哈希值），
+/// 避免 `HashMap` 对 `u64` 键重复运行 SipHash。
+#[derive(Default)]
+struct IdentityU64Hasher(u64);
+
+impl std::hash::Hasher for IdentityU64Hasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut acc = self.0;
+        for &b in bytes {
+            acc = acc.wrapping_mul(0x100_0000_01b3) ^ (b as u64);
+        }
+        self.0 = acc;
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+type IdentityBuildHasher = std::hash::BuildHasherDefault<IdentityU64Hasher>;
+
+/// 针对文件名与路径字符串的 64 位高速哈希（8 字节分块 + SplitMix64 终结混洗）：
+/// 确保低位桶索引与高 7 位 SIMD 控制标签均充分雪崩，供 `IdentityU64Hasher` 直通查表。
+#[inline]
+fn hash_str_64(text: &str) -> u64 {
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = 0x9e37_79b9_7f4a_7c15u64 ^ (text.len() as u64).wrapping_mul(K);
+    let bytes = text.as_bytes();
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+        h = (h.rotate_left(5) ^ word).wrapping_mul(K);
+    }
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut tail = 0u64;
+        for (i, &b) in rem.iter().enumerate() {
+            tail |= (b as u64) << (i * 8);
+        }
+        h = (h.rotate_left(5) ^ tail).wrapping_mul(K);
+    }
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
 struct PoolEntry {
     text: Box<str>,
     references: u32,
@@ -317,16 +367,19 @@ struct PoolEntry {
 #[derive(Default)]
 pub(crate) struct StringPool {
     slots: Vec<Option<PoolEntry>>,
-    lookup: std::collections::HashMap<u64, u32>,
+    lookup: std::collections::HashMap<u64, u32, IdentityBuildHasher>,
     free: Vec<u32>,
     live: usize,
 }
 
 impl StringPool {
-    pub(crate) fn from_cache(
-        strings: Vec<String>,
+    pub(crate) fn from_cache<S>(
+        strings: Vec<S>,
         references: Vec<u32>,
-    ) -> Result<Self, IndexError> {
+    ) -> Result<Self, IndexError>
+    where
+        S: AsRef<str> + Into<Box<str>>,
+    {
         if strings.len() != references.len() {
             return Err(IndexError::InvalidReference);
         }
@@ -341,20 +394,21 @@ impl StringPool {
             if id == u32::MAX {
                 return Err(IndexError::IdOverflow);
             }
-            let hash = pool.hash(&text);
+            let text_ref = text.as_ref();
+            let hash = pool.hash(text_ref);
             let next = pool.lookup.get(&hash).copied().unwrap_or(u32::MAX);
             let mut current = next;
             while current != u32::MAX {
                 let slot = pool.slots[current as usize]
                     .as_ref()
                     .ok_or(IndexError::InvalidReference)?;
-                if slot.text.as_ref() == text {
+                if slot.text.as_ref() == text_ref {
                     return Err(IndexError::InvalidReference);
                 }
                 current = slot.next;
             }
             pool.slots.push(Some(PoolEntry {
-                text: text.into_boxed_str(),
+                text: text.into(),
                 references,
                 next,
             }));
@@ -364,9 +418,9 @@ impl StringPool {
         Ok(pool)
     }
 
+    #[inline]
     fn hash(&self, text: &str) -> u64 {
-        use std::hash::BuildHasher;
-        self.lookup.hasher().hash_one(text)
+        hash_str_64(text)
     }
 
     pub(crate) fn intern(&mut self, text: &str) -> Result<u32, IndexError> {
@@ -478,6 +532,13 @@ impl StringPool {
             current = slot.next;
         }
         None
+    }
+
+    pub(crate) fn find_matching(&self, mut predicate: impl FnMut(&str) -> bool) -> Option<u32> {
+        self.slots.iter().enumerate().find_map(|(idx, slot)| {
+            let text = slot.as_ref()?.text.as_ref();
+            predicate(text).then_some(idx as u32)
+        })
     }
 
     pub(crate) fn release(&mut self, id: u32) {
@@ -608,6 +669,23 @@ impl StringPool {
         vec![0; self.slots.len()]
     }
 
+    /// 池内槽位是否完全紧凑无空洞（每个槽位 ID 即其序列化序号，存盘时可免重映射直接借用 records）。
+    #[inline]
+    pub(crate) fn is_dense(&self) -> bool {
+        self.free.is_empty() && self.live == self.slots.len()
+    }
+
+    pub(crate) fn cache_strings_dense(&self) -> Vec<&str> {
+        debug_assert!(self.is_dense());
+        let mut strings = Vec::with_capacity(self.live);
+        for slot in &self.slots {
+            if let Some(slot) = slot {
+                strings.push(&*slot.text);
+            }
+        }
+        strings
+    }
+
     pub(crate) fn cache_strings(&self) -> (Vec<&str>, Vec<u32>) {
         let mut strings = Vec::with_capacity(self.live);
         let mut mapping = vec![u32::MAX; self.slots.len()];
@@ -618,6 +696,172 @@ impl StringPool {
             }
         }
         (strings, mapping)
+    }
+
+    /// 重映射池中匹配指定前缀的字符串，并重建哈希表与冲突链。
+    ///
+    /// 遵循目录边界语义：
+    /// - 若 `old_prefix` 以 '/' 结尾，匹配所有以此前缀开头的字符串；
+    /// - 若 `old_prefix` 不以 '/' 结尾，匹配全等或后接 '/' 的目录前缀（避免误伤如 ShareExtra）。
+    /// 重构后重建每个活跃槽位的哈希值与 `next` 链表，若存在重串碰撞则返回错误且保持池状态未修改。
+    pub(crate) fn remap_prefix(
+        &mut self,
+        old_prefix: &str,
+        new_prefix: &str,
+        case_insensitive: bool,
+    ) -> Result<usize, IndexError> {
+        if old_prefix == new_prefix {
+            return Ok(0);
+        }
+
+        let mut staged_replacements: Vec<Option<Box<str>>> = vec![None; self.slots.len()];
+        let mut count = 0;
+
+        for (id, slot) in self.slots.iter().enumerate() {
+            if let Some(entry) = slot {
+                if let Some(remapped) =
+                    match_and_remap_prefix(&entry.text, old_prefix, new_prefix, case_insensitive)
+                {
+                    if remapped.as_str() != entry.text.as_ref() {
+                        staged_replacements[id] = Some(remapped.into_boxed_str());
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let mut new_lookup = std::collections::HashMap::with_capacity_and_hasher(
+            self.live,
+            IdentityBuildHasher::default(),
+        );
+        let mut new_next = vec![u32::MAX; self.slots.len()];
+
+        for (id, slot) in self.slots.iter().enumerate() {
+            if slot.is_some() {
+                let text: &str = if let Some(ref remapped) = staged_replacements[id] {
+                    remapped.as_ref()
+                } else {
+                    &slot.as_ref().unwrap().text
+                };
+
+                let hash = self.hash(text);
+                let prev_head = new_lookup.get(&hash).copied().unwrap_or(u32::MAX);
+                let mut current = prev_head;
+                while current != u32::MAX {
+                    let curr_text: &str =
+                        if let Some(ref remapped) = staged_replacements[current as usize] {
+                            remapped.as_ref()
+                        } else {
+                            &self.slots[current as usize].as_ref().unwrap().text
+                        };
+                    if curr_text == text {
+                        return Err(IndexError::InvalidReference);
+                    }
+                    current = new_next[current as usize];
+                }
+
+                new_next[id] = prev_head;
+                new_lookup.insert(hash, id as u32);
+            }
+        }
+
+        for (id, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(entry) = slot {
+                if let Some(remapped) = staged_replacements[id].take() {
+                    entry.text = remapped;
+                }
+                entry.next = new_next[id];
+            }
+        }
+        self.lookup = new_lookup;
+
+        Ok(count)
+    }
+}
+
+fn match_and_remap_prefix(
+    text: &str,
+    old_prefix: &str,
+    new_prefix: &str,
+    case_insensitive: bool,
+) -> Option<String> {
+    if old_prefix.is_empty() {
+        return None;
+    }
+
+    let match_prefix_ci = |haystack: &str, needle: &str| -> Option<usize> {
+        if haystack.len() < needle.len() {
+            return None;
+        }
+        if haystack.is_ascii() && needle.is_ascii() {
+            if haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes()) {
+                return Some(needle.len());
+            }
+            return None;
+        }
+        let mut h_chars = haystack.chars();
+        let mut n_chars = needle.chars();
+        let mut matched_bytes = 0;
+        while let Some(nc) = n_chars.next() {
+            let Some(hc) = h_chars.next() else { return None; };
+            if nc == hc || nc.to_lowercase().eq(hc.to_lowercase()) {
+                matched_bytes += hc.len_utf8();
+            } else {
+                return None;
+            }
+        }
+        Some(matched_bytes)
+    };
+
+    if old_prefix.ends_with('/') {
+        let matched = if case_insensitive {
+            match_prefix_ci(text, old_prefix)
+        } else if text.starts_with(old_prefix) {
+            Some(old_prefix.len())
+        } else {
+            None
+        };
+        matched.map(|bytes| {
+            let suffix = &text[bytes..];
+            format!("{new_prefix}{suffix}")
+        })
+    } else {
+        let is_exact = if case_insensitive {
+            if text.len() == old_prefix.len() {
+                if text.is_ascii() && old_prefix.is_ascii() {
+                    text.eq_ignore_ascii_case(old_prefix)
+                } else {
+                    text.to_lowercase() == old_prefix.to_lowercase()
+                }
+            } else {
+                false
+            }
+        } else {
+            text == old_prefix
+        };
+        if is_exact {
+            return Some(new_prefix.to_string());
+        }
+
+        let matched = if case_insensitive {
+            match_prefix_ci(text, old_prefix)
+        } else if text.starts_with(old_prefix) {
+            Some(old_prefix.len())
+        } else {
+            None
+        };
+        if let Some(bytes) = matched {
+            if text[bytes..].starts_with('/') {
+                let suffix = &text[bytes..];
+                let prefix_trimmed = new_prefix.trim_end_matches('/');
+                return Some(format!("{prefix_trimmed}{suffix}"));
+            }
+        }
+        None
     }
 }
 
@@ -760,5 +1004,140 @@ mod tests {
         assert_eq!(pool.get(first), Some("first"));
         pool.release_hashed(first, 7);
         assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn name_signature_superset_invariant_for_unicode_normalization() {
+        let exact_pairs = [
+            ("cafe\u{0301}.txt", "café"),
+            ("café.txt", "cafe\u{0301}"),
+            ("\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}.txt", "한글"),
+            ("한글.txt", "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}"),
+            ("開發規範.md", "开发"),
+        ];
+
+        for (name, query) in exact_pairs {
+            let name_sig = NameSignature::from_name(name, None);
+            let sub_req = NameSignature::from_substring_query(query);
+            assert!(
+                name_sig.contains(sub_req),
+                "substring signature superset violated for name={name:?} query={query:?}"
+            );
+            let fuzzy_req = NameSignature::from_fuzzy_query(query);
+            assert!(
+                name_sig.contains(fuzzy_req),
+                "fuzzy signature superset violated for name={name:?} query={query:?}"
+            );
+        }
+
+        // 模糊搜索中纯 ASCII "cafe" 必须能匹配 NFD "cafe\u{0301}.txt" 与 NFC "café.txt"
+        for name in ["cafe\u{0301}.txt", "café.txt"] {
+            let name_sig = NameSignature::from_name(name, None);
+            let fuzzy_req = NameSignature::from_fuzzy_query("cafe");
+            assert!(
+                name_sig.contains(fuzzy_req),
+                "fuzzy de-accenting superset violated for name={name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn name_signature_superset_invariant_for_polyphones_and_vu() {
+        let polyphone_and_vu_pairs = [
+            ("重量.xlsx", "zhongliang"),
+            ("重新整理.md", "chongxin"),
+            ("银行对账单.pdf", "yinhang"),
+            ("行事历.ics", "xingshi"),
+            ("長度说明.txt", "changdu"),
+            ("长度说明.txt", "changdu"),
+            ("调试日志.log", "tiaoshi"),
+            ("地图.png", "ditu"),
+            ("音樂.mp3", "yinyue"),
+            ("音乐.mp3", "yinyue"),
+            ("乾坤.txt", "qiankun"),
+            ("干坤.txt", "qiankun"),
+            ("绿色.txt", "lvse"),
+            ("女儿.png", "nver"),
+            ("略过.txt", "lve"),
+            ("觉得.txt", "jve"),
+            ("概率统计.pdf", "gailv"),
+            ("2026年财务预算表.xlsx", "2026ncw"),
+        ];
+
+        for (name, query) in polyphone_and_vu_pairs {
+            let name_sig = NameSignature::from_name(name, None);
+            let sub_req = NameSignature::from_substring_query(query);
+            assert!(
+                name_sig.contains(sub_req),
+                "substring signature superset violated for name={name:?} query={query:?}"
+            );
+            let fuzzy_req = NameSignature::from_fuzzy_query(query);
+            assert!(
+                name_sig.contains(fuzzy_req),
+                "fuzzy signature superset violated for name={name:?} query={query:?}"
+            );
+        }
+
+        // 纯 ASCII 对照组：严禁在 ASCII 字节路径交叉置 u/v 位，防止 "dev" 与 "use" 误匹配
+        let dev_sig = NameSignature::from_name("dev.rs", None);
+        let use_sig = NameSignature::from_name("use.rs", None);
+        let dev_sub = NameSignature::from_substring_query("dev");
+        let use_sub = NameSignature::from_substring_query("use");
+        let dev_fuzzy = NameSignature::from_fuzzy_query("dev");
+        let use_fuzzy = NameSignature::from_fuzzy_query("use");
+
+        assert!(dev_sig.contains(dev_sub));
+        assert!(use_sig.contains(use_sub));
+        assert!(!use_sig.contains(dev_sub));
+        assert!(!dev_sig.contains(use_sub));
+        assert!(!use_sig.contains(dev_fuzzy));
+        assert!(!dev_sig.contains(use_fuzzy));
+
+        // 排除非 ü 系 u 音节误带 v 位
+        let luan_sig = NameSignature::from_name("乱码.txt", None);
+        assert!(!luan_sig.contains(NameSignature::from_substring_query("lv")));
+    }
+
+    #[test]
+    fn remap_prefix_exact_boundary_and_rebuild_lookup() {
+        let mut pool = StringPool::default();
+        let p1 = pool.intern("/Volumes/Share/").unwrap();
+        let p2 = pool.intern("/Volumes/Share/sub/").unwrap();
+        let p3 = pool.intern("/Volumes/ShareExtra/").unwrap();
+
+        let count = pool
+            .remap_prefix("/Volumes/Share/", "/Volumes/Share-1/", false)
+            .unwrap();
+        assert_eq!(count, 2);
+
+        assert_eq!(pool.get(p1), Some("/Volumes/Share-1/"));
+        assert_eq!(pool.get(p2), Some("/Volumes/Share-1/sub/"));
+        assert_eq!(pool.get(p3), Some("/Volumes/ShareExtra/"));
+
+        assert_eq!(pool.find("/Volumes/Share-1/"), Some(p1));
+        assert_eq!(pool.find("/Volumes/Share-1/sub/"), Some(p2));
+        assert_eq!(pool.find("/Volumes/ShareExtra/"), Some(p3));
+        assert_eq!(pool.find("/Volumes/Share/"), None);
+
+        let mut refs = vec![0u32; pool.slot_len()];
+        refs[p1 as usize] = 1;
+        refs[p2 as usize] = 1;
+        refs[p3 as usize] = 1;
+        pool.validate_references(&refs).unwrap();
+    }
+
+    #[test]
+    fn remap_prefix_rejects_duplicate_collision() {
+        let mut pool = StringPool::default();
+        let p1 = pool.intern("/Volumes/Share/").unwrap();
+        let p2 = pool.intern("/Volumes/Share-1/").unwrap();
+
+        let err = pool
+            .remap_prefix("/Volumes/Share/", "/Volumes/Share-1/", false)
+            .unwrap_err();
+        assert!(matches!(err, IndexError::InvalidReference));
+
+        assert_eq!(pool.get(p1), Some("/Volumes/Share/"));
+        assert_eq!(pool.get(p2), Some("/Volumes/Share-1/"));
     }
 }
